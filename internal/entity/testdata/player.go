@@ -3,7 +3,10 @@ package testdata
 import (
 	"github.com/tjbdwanghaibo/cube-core/checkpoint"
 	"github.com/tjbdwanghaibo/cube-core/entity"
+	"github.com/tjbdwanghaibo/cube/game/clientsync"
 )
+
+var _ clientsync.SyncPacker
 
 // Entity category constants
 const (

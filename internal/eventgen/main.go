@@ -19,6 +19,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
+	"github.com/tjbdwanghaibo/cube-codegen/internal/project"
 )
 
 func main() {
@@ -26,7 +28,7 @@ func main() {
 	outDir := flag.String("out", "./event", "output directory for generated event code")
 	pkg := flag.String("pkg", "event", "generated package name")
 	gameDir := flag.String("game", "", "game directory to scan for DealEventXXX handlers")
-	eventPkg := flag.String("eventpkg", "github.com/tjbdwanghaibo/cube/event", "import path for event package")
+	eventPkg := flag.String("eventpkg", "", "import path for event package (default: derive from -out)")
 	force := flag.Bool("force", false, "force regeneration")
 	flag.Parse()
 
@@ -40,6 +42,16 @@ func main() {
 	}
 	if err := os.MkdirAll(absOutDir, 0755); err != nil {
 		log.Fatalf("create out dir: %v", err)
+	}
+	if *eventPkg == "" {
+		info, err := project.Discover(absOutDir)
+		if err != nil {
+			log.Fatalf("discover event module: %v", err)
+		}
+		*eventPkg, err = info.ImportPath(absOutDir)
+		if err != nil {
+			log.Fatalf("derive event import: %v", err)
+		}
 	}
 
 	// Phase 1: generate event types

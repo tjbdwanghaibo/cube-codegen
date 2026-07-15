@@ -288,11 +288,7 @@ func collectEntityImports(ent EntityDef, importMap map[string]ImportDef) []Impor
 	for alias := range used {
 		imp, ok := importMap[alias]
 		if !ok {
-			var found bool
-			imp, found = defaultImport(alias)
-			if !found {
-				continue
-			}
+			continue
 		}
 		if imp.Path == "github.com/tjbdwanghaibo/cube-core/entity" || imp.Path == "github.com/tjbdwanghaibo/cube-core/checkpoint" {
 			continue
@@ -303,17 +299,6 @@ func collectEntityImports(ent EntityDef, importMap map[string]ImportDef) []Impor
 		return out[i].Alias < out[j].Alias
 	})
 	return out
-}
-
-func defaultImport(alias string) (ImportDef, bool) {
-	switch alias {
-	case "view":
-		return ImportDef{Alias: alias, Path: "github.com/tjbdwanghaibo/cube/game/view"}, true
-	case "clientsync":
-		return ImportDef{Alias: alias, Path: "github.com/tjbdwanghaibo/cube/game/clientsync"}, true
-	default:
-		return ImportDef{}, false
-	}
 }
 
 func qualifier(expr string) string {

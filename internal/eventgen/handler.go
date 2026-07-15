@@ -16,6 +16,7 @@ import (
 type HandlerInfo struct {
 	Package  string
 	Receiver string // receiver type name, e.g. "Player"
+	EventPkg string
 	Events   []HandlerEvent
 	FilePath string // source file path
 }
@@ -149,6 +150,7 @@ func scanFile(filePath string, eventPkg string) ([]HandlerInfo, error) {
 		handlers = append(handlers, HandlerInfo{
 			Package:  pkg,
 			Receiver: recv,
+			EventPkg: eventPkg,
 			Events:   events,
 			FilePath: filePath,
 		})
