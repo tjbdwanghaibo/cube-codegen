@@ -41,6 +41,22 @@ func TestDiscoverRejectsDirectoryOutsideModule(t *testing.T) {
 	}
 }
 
+func TestPackageNameFallsBackToGeneratedFiles(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "go.mod"), "module example.com/game\n")
+	out := filepath.Join(root, "generated")
+	writeFile(t, filepath.Join(out, "gen_config.go"), "package generated\n")
+
+	info, err := Discover(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := info.PackageName(out)
+	if err != nil || name != "generated" {
+		t.Fatalf("PackageName = %q, %v", name, err)
+	}
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

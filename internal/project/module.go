@@ -3,6 +3,7 @@ package project
 
 import (
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -61,16 +62,15 @@ func (i Info) PackageName(dir string) (string, error) {
 	if _, err := i.ImportPath(dir); err != nil {
 		return "", err
 	}
-	set := token.NewFileSet()
-	packages, err := parser.ParseDir(set, dir, func(info os.FileInfo) bool {
-		name := info.Name()
-		return strings.HasSuffix(name, ".go") &&
-			!strings.HasSuffix(name, "_test.go") &&
-			!strings.HasPrefix(name, "gen_") &&
-			!strings.HasSuffix(name, "_gen.go")
-	}, parser.PackageClauseOnly)
+	packages, err := parsePackages(dir, false)
 	if err != nil {
 		return "", err
+	}
+	if len(packages) == 0 {
+		packages, err = parsePackages(dir, true)
+		if err != nil {
+			return "", err
+		}
 	}
 	if len(packages) != 1 {
 		return "", fmt.Errorf("expected one non-generated package in %s, found %d", dir, len(packages))
@@ -79,6 +79,17 @@ func (i Info) PackageName(dir string) (string, error) {
 		return name, nil
 	}
 	return "", fmt.Errorf("no package found in %s", dir)
+}
+
+func parsePackages(dir string, includeGenerated bool) (map[string]*ast.Package, error) {
+	set := token.NewFileSet()
+	return parser.ParseDir(set, dir, func(info os.FileInfo) bool {
+		name := info.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return false
+		}
+		return includeGenerated || (!strings.HasPrefix(name, "gen_") && !strings.HasSuffix(name, "_gen.go"))
+	}, parser.PackageClauseOnly)
 }
 
 func modulePath(raw []byte) (string, error) {
