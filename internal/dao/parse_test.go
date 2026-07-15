@@ -1,0 +1,434 @@
+package dao
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestParseDefDir(t *testing.T) {
+	dir, err := filepath.Abs("./testdata/def")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defs, err := parseDefDir(dir)
+	if err != nil {
+		t.Fatalf("parseDefDir: %v", err)
+	}
+
+	// Should find 1 DAO
+	if len(defs.Daos) != 1 {
+		t.Fatalf("expected 1 dao, got %d", len(defs.Daos))
+	}
+	if len(defs.RedisDaos) != 1 {
+		t.Fatalf("expected 1 redis dao, got %d", len(defs.RedisDaos))
+	}
+
+	dao := defs.Daos[0]
+	if dao.Name != "HeroDao" {
+		t.Fatalf("expected dao name 'HeroDao', got %q", dao.Name)
+	}
+	if dao.Coll != "heroes" {
+		t.Fatalf("expected coll 'heroes', got %q", dao.Coll)
+	}
+	if dao.Db != "game" {
+		t.Fatalf("expected db 'game', got %q", dao.Db)
+	}
+
+	// Tmp (dao:"-") should be skipped, so 8 fields total
+	if len(dao.Fields) != 8 {
+		t.Fatalf("expected 8 fields, got %d: %v", len(dao.Fields), fieldNames(dao.Fields))
+	}
+
+	// Check LoginAt has persist-only tag
+	loginAt := findField(dao.Fields, "LoginAt")
+	if loginAt == nil {
+		t.Fatal("LoginAt field not found")
+	}
+	if !loginAt.Tag.Persist || loginAt.Tag.Sync {
+		t.Fatalf("LoginAt should be persist=true, sync=false, got %+v", loginAt.Tag)
+	}
+
+	// Check Items is map
+	items := findField(dao.Fields, "Items")
+	if items == nil {
+		t.Fatal("Items field not found")
+	}
+	if items.Kind != KindMap {
+		t.Fatalf("Items should be KindMap, got %d", items.Kind)
+	}
+	if items.MapKey != "int64" || items.MapVal != "int32" {
+		t.Fatalf("Items map types wrong: key=%q val=%q", items.MapKey, items.MapVal)
+	}
+
+	// Check Friends is slice
+	friends := findField(dao.Fields, "Friends")
+	if friends == nil {
+		t.Fatal("Friends field not found")
+	}
+	if friends.Kind != KindSlice {
+		t.Fatalf("Friends should be KindSlice, got %d", friends.Kind)
+	}
+	if friends.SliceElem != "int64" {
+		t.Fatalf("Friends slice elem should be int64, got %q", friends.SliceElem)
+	}
+
+	// Check Pos is nested struct
+	pos := findField(dao.Fields, "Pos")
+	if pos == nil {
+		t.Fatal("Pos field not found")
+	}
+	if pos.Kind != KindStruct {
+		t.Fatalf("Pos should be KindStruct, got %d", pos.Kind)
+	}
+
+	// Check Equips is map with pointer value
+	equips := findField(dao.Fields, "Equips")
+	if equips == nil {
+		t.Fatal("Equips field not found")
+	}
+	if equips.Kind != KindMap || !equips.IsPtr {
+		t.Fatalf("Equips should be KindMap with IsPtr=true, got kind=%d isPtr=%v", equips.Kind, equips.IsPtr)
+	}
+	if equips.MapVal != "EquipInfo" {
+		t.Fatalf("Equips map val should be EquipInfo, got %q", equips.MapVal)
+	}
+
+	// Should auto-detect nested structs recursively: Position, EquipInfo, GemInfo
+	if len(defs.Nested) != 3 {
+		t.Fatalf("expected 3 nested, got %d", len(defs.Nested))
+	}
+
+	nestedNames := make(map[string]bool)
+	for _, n := range defs.Nested {
+		nestedNames[n.Name] = true
+	}
+	if !nestedNames["Position"] {
+		t.Fatal("Position not detected as nested")
+	}
+	if !nestedNames["EquipInfo"] {
+		t.Fatal("EquipInfo not detected as nested")
+	}
+	if !nestedNames["GemInfo"] {
+		t.Fatal("GemInfo not detected as nested")
+	}
+
+	redisDao := defs.RedisDaos[0]
+	if redisDao.Name != "CacheSession" {
+		t.Fatalf("expected redis dao name CacheSession, got %q", redisDao.Name)
+	}
+	if redisDao.Mode != "ref-hmap" {
+		t.Fatalf("expected redis mode ref-hmap, got %q", redisDao.Mode)
+	}
+	if redisDao.Key != "Snapshot.InstanceRunID" {
+		t.Fatalf("expected redis key Snapshot.InstanceRunID, got %q", redisDao.Key)
+	}
+	if redisDao.KeyType != "int64" {
+		t.Fatalf("expected redis key type int64, got %q", redisDao.KeyType)
+	}
+	if redisDao.Prefix != "cube:test:session" {
+		t.Fatalf("expected redis prefix cube:test:session, got %q", redisDao.Prefix)
+	}
+	if redisDao.Version != "Version" {
+		t.Fatalf("expected redis version Version, got %q", redisDao.Version)
+	}
+	if redisDao.TTL != "1h" {
+		t.Fatalf("expected redis ttl 1h, got %q", redisDao.TTL)
+	}
+}
+
+func TestGenerateDao(t *testing.T) {
+	dir, err := filepath.Abs("./testdata/def")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defs, err := parseDefDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := t.TempDir()
+
+	// Generate DAO
+	outFile := filepath.Join(outDir, "gen_hero_dao_dao.go")
+	changed, err := generateDao(defs.Daos[0], defs, "testdata", outFile, true)
+	if err != nil {
+		t.Fatalf("generateDao: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected file to be generated")
+	}
+
+	content, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(content)
+
+	checks := []string{
+		"package testdata",
+		"type HeroDao struct {",
+		"Tracker",
+		"checkpoint.DirtyTracker",
+		"persistPatchSet",
+		"map[string]any",
+		"func NewHeroDao() *HeroDao",
+		"HeroDaoDBName",
+		"HeroDaoCollection",
+		`"heroes"`,
+		"HeroDaoSchemaVersion uint32 = 1",
+		"func (d *HeroDao) Id() int64",
+		"func (d *HeroDao) DbName() string",
+		"return HeroDaoDBName",
+		"func (d *HeroDao) CollName() string",
+		"return HeroDaoCollection",
+		"func (d *HeroDao) SchemaVersion() uint32",
+		"return HeroDaoSchemaVersion",
+		"func (d *HeroDao) Migrate(raw []byte, from uint32) ([]byte, error)",
+		"func (d *HeroDao) DirtyTracker() *checkpoint.DirtyTracker",
+		"func (d *HeroDao) SetName(v string)",
+		"func (d *HeroDao) SetLevel(v int32)",
+		"func (d *HeroDao) SetItems(key int64, val int32)",
+		"func (d *HeroDao) DelItems(key int64)",
+		"func (d *HeroDao) markItemsKeyDirty(key int64, val int32)",
+		`checkpoint.MapPatchPath("items", key)`,
+		"d.recordPersistPatchSet(\"items\", path, val)",
+		"d.recordPersistPatchUnset(\"items\", path)",
+		"*fmap.SmallSafeMap[int64, int32]",
+		"d.Items = fmap.NewSmallSafeMap[int64, int32](0)",
+		`"items":    d.heroDaoItemsRawMap()`,
+		"func (d *HeroDao) AddFriends(v int64)",
+		"func (d *HeroDao) SetPos(v Position)",
+		"d.Pos.SetNotify(d.markPosDirty)",
+		"func (d *HeroDao) SetEquips(key int64, val *EquipInfo)",
+		"*fmap.SmallSafeMap[int64, *EquipInfo]",
+		"val.SetNotify(func() { d.markEquipsKeyDirty(key, val) })",
+		"func (d *HeroDao) Marshal() []byte",
+		"func (d *HeroDao) MarshalPersist(mask uint64) []byte",
+		`"_schema"`,
+		"HeroDaoSchemaVersion",
+		"d.appendPersistPathPatch(&patch, fullFields)",
+		"func (d *HeroDao) MarshalSync(mask uint64) []byte",
+		"func (d *HeroDao) ApplySync(raw []byte) error",
+		"func (d *HeroDao) Unmarshal(raw []byte) error",
+		"d.Init()",
+	}
+	for _, check := range checks {
+		if !strings.Contains(s, check) {
+			t.Errorf("generated DAO code missing: %q", check)
+		}
+	}
+
+	// LoginAt should be in Marshal and have a setter because persist-only
+	// fields still need to mark persist dirty.
+	if !strings.Contains(s, `"login_at": d.LoginAt`) {
+		t.Error("LoginAt should appear in Marshal (persist field)")
+	}
+	if !strings.Contains(s, "func (d *HeroDao) SetLoginAt") {
+		t.Error("LoginAt should have a setter (persist field)")
+	}
+	if !strings.Contains(s, "d.markLoginAtDirty()") {
+		t.Error("SetLoginAt should mark persist dirty")
+	}
+
+	// Tmp should not appear at all
+	if strings.Contains(s, "Tmp") {
+		t.Error("Tmp (dao:\"-\") should not appear in generated code")
+	}
+
+	// Second run should be unchanged
+	changed, err = generateDao(defs.Daos[0], defs, "testdata", outFile, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("expected no change on second run")
+	}
+}
+
+func TestGenerateNested(t *testing.T) {
+	dir, err := filepath.Abs("./testdata/def")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defs, err := parseDefDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := t.TempDir()
+
+	// Find Position nested
+	var posDef NestedDef
+	for _, n := range defs.Nested {
+		if n.Name == "Position" {
+			posDef = n
+			break
+		}
+	}
+
+	outFile := filepath.Join(outDir, "gen_position_nested.go")
+	changed, err := generateNested(posDef, "testdata", outFile, true)
+	if err != nil {
+		t.Fatalf("generateNested: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected file to be generated")
+	}
+
+	content, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(content)
+
+	checks := []string{
+		"package testdata",
+		"type Position struct {",
+		"checkpoint.DirtyHook",
+		"X int32",
+		"Y int32",
+		"func (s *Position) SetX(v int32)",
+		"func (s *Position) SetY(v int32)",
+		"s.Mark()",
+	}
+	for _, check := range checks {
+		if !strings.Contains(s, check) {
+			t.Errorf("generated nested code missing: %q", check)
+		}
+	}
+}
+
+func TestGenerateRedisDao(t *testing.T) {
+	dir, err := filepath.Abs("./testdata/def")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defs, err := parseDefDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defs.RedisDaos) != 1 {
+		t.Fatalf("expected 1 redis dao, got %d", len(defs.RedisDaos))
+	}
+
+	outDir := t.TempDir()
+	outFile := filepath.Join(outDir, "gen_cache_session_redis_dao.go")
+	changed, err := generateRedisDao(defs.RedisDaos[0], "testdata", outFile, true)
+	if err != nil {
+		t.Fatalf("generateRedisDao: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected file to be generated")
+	}
+
+	content, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(content)
+
+	checks := []string{
+		"package testdata",
+		`CacheSessionRedisDAODefaultPrefix = "cube:test:session"`,
+		"CacheSessionRedisDAOName",
+		`"cache_session"`,
+		"type CacheSessionRedisDAO interface {",
+		"GetCacheSession(ctx context.Context, key int64) (CacheSession, bool, error)",
+		"SetCacheSession(ctx context.Context, value CacheSession) error",
+		"DeleteCacheSession(ctx context.Context, key int64) error",
+		"PatchCacheSession(ctx context.Context, key int64, path string, value any) error",
+		"func NewLocalCacheSessionRedisDAO() CacheSessionRedisDAO",
+		"func NewRedisCacheSessionRedisDAO(redis fredis.IRedis, prefix string, ttl time.Duration) CacheSessionRedisDAO",
+		"fcache.NewRedisRefHMapStore[int64, CacheSession]",
+		"Name:        CacheSessionRedisDAOName",
+		"TTL:         ttl",
+		"KeyOf: func(value CacheSession) int64 {",
+		"return value.Snapshot.InstanceRunID",
+		"Stale: fcache.VersionStale(func(value CacheSession) int64 { return int64(value.Version) })",
+		"func NewCachedCacheSessionRedisDAOWithTTL(local CacheSessionRedisDAO, remote CacheSessionRedisDAO, ttl time.Duration) CacheSessionRedisDAO",
+		"patcher fcache.RefHMapPatcher[int64]",
+		"return s.patcher.Patch(ctx, key, path, value)",
+		"fcache.PatchStructPath(&current, path, value)",
+	}
+	for _, check := range checks {
+		if !strings.Contains(s, check) {
+			t.Errorf("generated Redis DAO code missing: %q", check)
+		}
+	}
+}
+
+func TestGenerateRawRedisDao(t *testing.T) {
+	dao := RedisDaoDef{
+		Name:    "CacheSession",
+		Mode:    "raw",
+		Key:     "Snapshot.InstanceRunID",
+		KeyType: "int64",
+		Prefix:  "cube:test:session",
+		Version: "Version",
+		TTL:     "1h",
+	}
+	outFile := filepath.Join(t.TempDir(), "gen_cache_session_redis_dao.go")
+
+	changed, err := generateRedisDao(dao, "testdata", outFile, true)
+	if err != nil {
+		t.Fatalf("generateRedisDao raw: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected raw redis dao file to be generated")
+	}
+	content, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(content)
+	for _, check := range []string{
+		"fcache.NewRedisRawJSONStore[int64, CacheSession]",
+		"func NewRedisCacheSessionRedisDAO(redis fredis.IRedis, prefix string, ttl time.Duration) CacheSessionRedisDAO",
+		"func (s cacheSessionRedisDAOStore) PatchCacheSession(ctx context.Context, key int64, path string, value any) error",
+		"fcache.PatchStructPath(&current, path, value)",
+	} {
+		if !strings.Contains(s, check) {
+			t.Errorf("generated raw Redis DAO code missing: %q", check)
+		}
+	}
+	if strings.Contains(s, "RefHMap") {
+		t.Fatalf("raw Redis DAO should not use RefHMap:\n%s", s)
+	}
+}
+
+func TestToSnakeDao(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Name", "name"},
+		{"LoginAt", "login_at"},
+		{"EquipInfo", "equip_info"},
+	}
+	for _, c := range cases {
+		got := toSnake(c.in)
+		if got != c.want {
+			t.Errorf("toSnake(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func findField(fields []FieldDef, name string) *FieldDef {
+	for i := range fields {
+		if fields[i].Name == name {
+			return &fields[i]
+		}
+	}
+	return nil
+}
+
+func fieldNames(fields []FieldDef) []string {
+	var names []string
+	for _, f := range fields {
+		names = append(names, f.Name)
+	}
+	return names
+}
