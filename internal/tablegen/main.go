@@ -130,11 +130,11 @@ func parseMetaRoot(root string) ([]Meta, error) {
 	if err != nil {
 		return nil, err
 	}
-	info, err := project.Discover(absRoot)
+	projectInfo, err := project.Discover(absRoot)
 	if err != nil {
 		return nil, err
 	}
-	module := info.ModulePath
+	module := projectInfo.ModulePath
 	var metas []Meta
 	err = filepath.Walk(absRoot, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
@@ -150,7 +150,7 @@ func parseMetaRoot(root string) ([]Meta, error) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		fileMetas, err := parseMetaFile(absRoot, module, path)
+		fileMetas, err := parseMetaFile(projectInfo.Root, module, path)
 		if err != nil {
 			return err
 		}
