@@ -110,7 +110,7 @@ func renderRoutes(pkg string, routes []Route) ([]byte, error) {
 	source.WriteString("\t\"net/http\"\n\n")
 	source.WriteString("\t\"github.com/tjbdwanghaibo/cube-core/webroute\"\n")
 	source.WriteString(")\n\n")
-	source.WriteString("func RegisterRoutes(reg webroute.Registerer, svc *Service) error {\n")
+	source.WriteString("func (svc *Service) RegisterRoutes(reg webroute.Registerer) error {\n")
 	for _, route := range routes {
 		fmt.Fprintf(&source, "\tif err := reg.Register(%q, %q, func(w http.ResponseWriter, r *http.Request) {\n", route.Method, route.Path)
 		if route.BodyMode == bodyJSON {
@@ -124,6 +124,8 @@ func renderRoutes(pkg string, routes []Route) ([]byte, error) {
 		source.WriteString("\t}); err != nil {\n\t\treturn err\n\t}\n")
 	}
 	source.WriteString("\treturn nil\n}\n")
+	source.WriteString("\nfunc RegisterRoutes(reg webroute.Registerer, svc *Service) error {\n")
+	source.WriteString("\treturn svc.RegisterRoutes(reg)\n}\n")
 	formatted, err := format.Source(source.Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("format generated route source: %w", err)

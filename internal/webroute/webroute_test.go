@@ -78,6 +78,7 @@ func TestGenerateRoutes(t *testing.T) {
 	source := string(content)
 	for _, want := range []string{
 		"func RegisterRoutes(reg webroute.Registerer, svc *Service) error",
+		"func (svc *Service) RegisterRoutes(reg webroute.Registerer) error",
 		"webroute.DecodeJSON(w, r, &request)",
 		"webroute.ReadRaw(w, r)",
 		`reg.Register("POST", "/external/json"`,
