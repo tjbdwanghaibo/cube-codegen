@@ -378,9 +378,10 @@ func (e *{{.Entity.Name}}) Snapshot() []checkpoint.SaveItem {
 				}
 			}
 		}
-		items = append(items, checkpoint.SaveItem{
-			Db:         e.{{.FieldName}}.DbName(),
-			Collection: e.{{.FieldName}}.CollName(),
+			items = append(items, checkpoint.SaveItem{
+				Db:         e.{{.FieldName}}.DbName(),
+				DbScope:    e.{{.FieldName}}.DbScope(),
+				Collection: e.{{.FieldName}}.CollName(),
 			ID:         e.{{.FieldName}}.Id(),
 			Version:    ver,
 			Mask:       mask,

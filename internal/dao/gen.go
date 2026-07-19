@@ -13,6 +13,9 @@ import (
 )
 
 func generateDao(dao DaoDef, defs *Definitions, pkg string, outFile string, force bool) (bool, error) {
+	if err := validateDatabaseScope(dao); err != nil {
+		return false, err
+	}
 	if err := validateGeneratedMapFields(dao.Fields); err != nil {
 		return false, err
 	}
@@ -139,6 +142,7 @@ func funcMap(defs *Definitions) template.FuncMap {
 		"lower1":        lower1,
 		"daoDBConst":    daoDBConstName,
 		"daoCollConst":  daoCollectionConstName,
+		"dbScope":       databaseScopeExpr,
 		"isNested":      func(typeName string) bool { return isNestedType(defs, typeName) },
 		"persistFields": func(fields []FieldDef) []FieldDef { return filterPersist(fields) },
 		"syncFields":    func(fields []FieldDef) []FieldDef { return filterSync(fields) },
@@ -153,6 +157,20 @@ func funcMap(defs *Definitions) template.FuncMap {
 		"mapHelperName": mapHelperName,
 		"hasMaps":       hasMapFields,
 	}
+}
+
+func validateDatabaseScope(dao DaoDef) error {
+	if dao.DbScope == "" || dao.DbScope == "global" || dao.DbScope == "sid" {
+		return nil
+	}
+	return fmt.Errorf("dao %s has unsupported dbscope %q (want global or sid)", dao.Name, dao.DbScope)
+}
+
+func databaseScopeExpr(dao DaoDef) string {
+	if dao.DbScope == "sid" {
+		return "checkpoint.DatabaseScopeServer"
+	}
+	return "checkpoint.DatabaseScopeGlobal"
 }
 
 func fieldMaskName(daoName, fieldName string) string {

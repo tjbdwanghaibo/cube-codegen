@@ -48,6 +48,7 @@ func New{{.Dao.Name}}() *{{.Dao.Name}} {
 func (d *{{.Dao.Name}}) Id() int64        { return d.id }
 func (d *{{.Dao.Name}}) SetId(id int64)   { d.id = id }
 func (d *{{.Dao.Name}}) DbName() string   { return {{daoDBConst .Dao.Name}} }
+func (d *{{.Dao.Name}}) DbScope() checkpoint.DatabaseScope { return {{dbScope .Dao}} }
 func (d *{{.Dao.Name}}) CollName() string  { return {{daoCollConst .Dao.Name}} }
 func (d *{{.Dao.Name}}) SchemaVersion() uint32 { return {{.Dao.Name}}SchemaVersion }
 func (d *{{.Dao.Name}}) Migrate(raw []byte, from uint32) ([]byte, error) { return migration.MigrateDAO(d.CollName(), raw, from, {{.Dao.Name}}SchemaVersion) }

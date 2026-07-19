@@ -23,10 +23,11 @@ type Definitions struct {
 
 // DaoDef is a DAO struct definition.
 type DaoDef struct {
-	Name   string // struct name, e.g. "PlayerDao"
-	Coll   string // collection name, e.g. "players"
-	Db     string // database name, e.g. "game"
-	Fields []FieldDef
+	Name    string // struct name, e.g. "PlayerDao"
+	Coll    string // collection name, e.g. "players"
+	Db      string // logical database name, e.g. "game"
+	DbScope string // global or sid
+	Fields  []FieldDef
 }
 
 // RedisDaoDef is a Redis DAO struct definition.
@@ -182,11 +183,16 @@ func extractDefs(fset *token.FileSet, f *ast.File, defs *Definitions) {
 				}
 
 				fields := extractFieldDefs(structType, defs)
+				dbScope := m.params["dbscope"]
+				if dbScope == "" {
+					dbScope = "global"
+				}
 				defs.Daos = append(defs.Daos, DaoDef{
-					Name:   typeSpec.Name.Name,
-					Coll:   m.params["coll"],
-					Db:     m.params["db"],
-					Fields: fields,
+					Name:    typeSpec.Name.Name,
+					Coll:    m.params["coll"],
+					Db:      m.params["db"],
+					DbScope: dbScope,
+					Fields:  fields,
 				})
 				break
 			}

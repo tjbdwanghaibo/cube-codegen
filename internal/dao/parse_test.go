@@ -36,6 +36,9 @@ func TestParseDefDir(t *testing.T) {
 	if dao.Db != "game" {
 		t.Fatalf("expected db 'game', got %q", dao.Db)
 	}
+	if dao.DbScope != "sid" {
+		t.Fatalf("expected dbscope 'sid', got %q", dao.DbScope)
+	}
 
 	// Tmp (dao:"-") should be skipped, so 8 fields total
 	if len(dao.Fields) != 8 {
@@ -183,6 +186,8 @@ func TestGenerateDao(t *testing.T) {
 		"func (d *HeroDao) Id() int64",
 		"func (d *HeroDao) DbName() string",
 		"return HeroDaoDBName",
+		"func (d *HeroDao) DbScope() checkpoint.DatabaseScope",
+		"return checkpoint.DatabaseScopeServer",
 		"func (d *HeroDao) CollName() string",
 		"return HeroDaoCollection",
 		"func (d *HeroDao) SchemaVersion() uint32",
