@@ -213,8 +213,9 @@ func RegisterEntity() {
 {{- end}}
 {{- if .Entity.Sync}}
 			Sync: entity.EntitySyncBuilderParam{
-				Enabled: true,
-				Topic: {{syncTopic .Entity.SyncTopic}},
+				Enabled:     true,
+				Topic:       {{syncTopic .Entity.SyncTopic}},
+				FlushPolicy: entity.SyncFlushOnEntityRelease,
 {{- if .Entity.SyncPacker}}
 				PackerFactory: {{.Entity.SyncPacker}},
 {{- end}}

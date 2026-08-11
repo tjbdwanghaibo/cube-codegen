@@ -31,6 +31,7 @@ func RegisterEntity() {
 			Sync: entity.EntitySyncBuilderParam{
 				Enabled:       true,
 				Topic:         "SyncTopicPlayer",
+				FlushPolicy:   entity.SyncFlushOnEntityRelease,
 				PackerFactory: clientsync.PlayerPacker,
 			},
 		})
