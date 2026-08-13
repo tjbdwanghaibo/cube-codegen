@@ -4,7 +4,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/tjbdwanghaibo/cube-codegen/internal/eventgen"
+	"github.com/tjbdwanghaibo/roost-codegen/internal/eventgen"
 )
 
 func main() {

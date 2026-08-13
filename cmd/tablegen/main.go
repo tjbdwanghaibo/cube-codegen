@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/tjbdwanghaibo/cube-codegen/internal/tablegen"
+	"github.com/tjbdwanghaibo/roost-codegen/internal/tablegen"
 )
 
 func main() {

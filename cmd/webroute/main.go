@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/tjbdwanghaibo/cube-codegen/internal/webroute"
+	"github.com/tjbdwanghaibo/roost-codegen/internal/webroute"
 )
 
 func main() {

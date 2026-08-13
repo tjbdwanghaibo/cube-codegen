@@ -17,7 +17,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/tjbdwanghaibo/cube-codegen/internal/project"
+	"github.com/tjbdwanghaibo/roost-codegen/internal/project"
 )
 
 func Run(args []string, stdout io.Writer) error {

@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/tjbdwanghaibo/cube-codegen/internal/dao"
+	"github.com/tjbdwanghaibo/roost-codegen/internal/dao"
 )
 
 func main() {

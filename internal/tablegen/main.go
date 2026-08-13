@@ -27,7 +27,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/tjbdwanghaibo/cube-codegen/internal/project"
+	"github.com/tjbdwanghaibo/roost-codegen/internal/project"
 )
 
 const (
@@ -89,7 +89,12 @@ func Run(args []string, stdout io.Writer) error {
 	}
 	if len(metas) == 0 {
 		_, _ = fmt.Fprintln(stdout, "tablegen: no table meta found")
-		return nil
+		// Still emit an empty registry when -out is requested. A freshly
+		// scaffolded project can then compile before its first business table is
+		// defined, and the file is replaced deterministically once metas exist.
+		if *outDir == "" {
+			return nil
+		}
 	}
 
 	if *csvTemplateDir != "" {
@@ -537,8 +542,10 @@ import (
 )
 
 var (
+	_ = csv.NewReader
 	_ = json.Unmarshal
 	_ = fmt.Errorf
+	_ io.Reader
 	_ = time.ParseDuration
 )
 
