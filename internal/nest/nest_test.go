@@ -31,8 +31,8 @@ func TestParseFile(t *testing.T) {
 	if f.Entities[0].Type != "IPlayerEntity" {
 		t.Fatalf("expected IPlayerEntity, got %s", f.Entities[0].Type)
 	}
-	if f.Entities[0].EntityKind != "EntityKindPlayer" {
-		t.Fatalf("expected EntityKindPlayer, got %s", f.Entities[0].EntityKind)
+	if f.Entities[0].EntityKind != "" || f.Entities[0].EntityCategory != "" {
+		t.Fatalf("business kind/category must not be inferred, got %+v", f.Entities[0])
 	}
 	if len(f.Params) != 1 || f.Params[0].Type != "string" {
 		t.Fatalf("expected 1 param of type string, got %v", f.Params)
@@ -55,8 +55,11 @@ func TestParseFile(t *testing.T) {
 	if len(f.Params) != 2 {
 		t.Fatalf("expected 2 params, got %d", len(f.Params))
 	}
-	if f.Rollback != "dirty" {
-		t.Fatalf("expected dirty rollback, got %q", f.Rollback)
+	if f.Rollback != "undo" {
+		t.Fatalf("expected undo rollback, got %q", f.Rollback)
+	}
+	if f.Durability != "strict" {
+		t.Fatalf("expected strict durability, got %q", f.Durability)
 	}
 
 	// handlerBroadcastToGroup: group entity
@@ -91,15 +94,21 @@ func TestParseFile(t *testing.T) {
 	if remote.Alias != "target_player" || remote.ParamName != "req" || remote.RefExpr != "req.TargetPlayerViewRef" {
 		t.Fatalf("remote access = %+v", remote)
 	}
-	if remote.Mode != "cache" || remote.Scope != "" || remote.Type != "view.PlayerViewMapSnapshot" || !remote.Required || remote.CacheTTLMillis != "" {
+	if remote.Consistency != "monotonic" || remote.Scope != "" || remote.Type != "view.PlayerViewMapSnapshot" || !remote.Required || remote.CacheTTLMillis != "" {
 		t.Fatalf("remote policy = %+v", remote)
 	}
 	remote = f.RemoteAccess[1]
 	if remote.Alias != "live_player" || remote.ParamName != "req" || remote.RefExpr != "req.LivePlayerViewRef" {
 		t.Fatalf("read-only remote access = %+v", remote)
 	}
-	if remote.Mode != "read_only" || remote.Type != "view.PlayerViewMapSnapshot" || remote.Required {
+	if remote.Consistency != "strong" || remote.Type != "view.PlayerViewMapSnapshot" || remote.Required {
 		t.Fatalf("read-only remote policy = %+v", remote)
+	}
+}
+
+func TestValidateTransactionOptionsRejectsLegacyDirty(t *testing.T) {
+	if err := validateTransactionOptions("dirty", "memory"); err == nil {
+		t.Fatal("legacy rollback=dirty must be rejected")
 	}
 }
 
@@ -111,7 +120,7 @@ func TestParseFileReadsRemoteRequestTagsFromPackageFiles(t *testing.T) {
 
 type IPlayerEntity interface{ ID() int64 }
 
-//cube:nest
+//roost:nest
 func handlerRemoteView(p IPlayerEntity, req RemoteViewRequest) {}
 `), 0644); err != nil {
 		t.Fatalf("write handler: %v", err)
@@ -176,18 +185,18 @@ func TestGenerate(t *testing.T) {
 		"nest.NewParamTypeMismatchError",
 		`nest.MustRegisterHandlerWithMeta(handlerNamePlayerLogin`,
 		`nest.MustRegisterHandlerWithMeta(handlerNameTransferItem`,
-		`nest.HandlerMeta{Rollback: nest.RollbackDirty}`,
+		`nest.HandlerMeta{Rollback: nest.RollbackUndo, Durability: nest.DurabilityStrict}`,
 		`func (req RemoteViewRequest) RemoteAccess() []nest.RemoteAccess`,
 		`nest.RemoteKey[view.PlayerViewMapSnapshot]{Alias: "target_player"}`,
 		`func (req RemoteViewRequest) TargetPlayer() (view.PlayerViewMapSnapshot, bool)`,
 		`func (req RemoteViewRequest) MustTargetPlayer() view.PlayerViewMapSnapshot`,
 		`nest.RemoteKey[view.PlayerViewMapSnapshot]{Alias: "live_player"}`,
 		`func (req RemoteViewRequest) LivePlayer() (view.PlayerViewMapSnapshot, bool)`,
-		`nest.RemoteAcquireReadOnly`,
+		`entity.RemoteReadMonotonic`,
+		`entity.RemoteReadLinearizable`,
 		`req.TargetPlayerViewRef`,
 		`req.LivePlayerViewRef`,
 		`nest.RemoteScopeOf[view.PlayerViewMapSnapshot]()`,
-		`nest.RemoteDefaultTTLMillisOf[view.PlayerViewMapSnapshot]()`,
 		`CacheTTLMillis: 0`,
 	}
 	for _, check := range checks {
@@ -195,11 +204,8 @@ func TestGenerate(t *testing.T) {
 			t.Errorf("output missing: %s", check)
 		}
 	}
-	if strings.Contains(src, `Mode: nest.RemoteAcquireReadOnly,
-			Scope:          nest.RemoteScopeOf[view.PlayerViewMapSnapshot](),
-			MinVersion:     req.LivePlayerViewRef.Version,
-			CacheTTLMillis: nest.RemoteDefaultTTLMillisOf[view.PlayerViewMapSnapshot](),`) {
-		t.Error("read_only remote access must not inherit cache default ttl")
+	if strings.Contains(src, `Mode: nest.RemoteAcquire`) {
+		t.Error("V2 generated remote access must not use legacy acquire modes")
 	}
 	for _, check := range []string{
 		"func Broadcast_PlayerLogin(",
@@ -224,13 +230,13 @@ func TestGenerate(t *testing.T) {
 	}
 	senderSrc := string(senderContent)
 	for _, check := range []string{
-		"func Broadcast_PlayerLogin(",
-		"func Send_PlayerLogin(",
-		"func Delay_PlayerLogin(",
-		"func MultiSend_TransferItem(",
-		"func MultiDelay_TransferItem(",
-		"func MultiGroupSend_BroadcastToGroup(",
-		"func MultiGroupDelay_BroadcastToGroup(",
+		"func (s *NestSender) Broadcast_PlayerLogin(ctx context.Context,",
+		"func (s *NestSender) Send_PlayerLogin(ctx context.Context,",
+		"func (s *NestSender) Delay_PlayerLogin(ctx context.Context,",
+		"func (s *NestSender) MultiSend_TransferItem(ctx context.Context,",
+		"func (s *NestSender) MultiDelay_TransferItem(ctx context.Context,",
+		"func (s *NestSender) MultiGroupSend_BroadcastToGroup(ctx context.Context,",
+		"func (s *NestSender) MultiGroupDelay_BroadcastToGroup(ctx context.Context,",
 	} {
 		if !strings.Contains(senderSrc, check) {
 			t.Errorf("sender output missing: %s", check)
@@ -266,11 +272,10 @@ func TestGenerate(t *testing.T) {
 	syncSenderSrc := string(syncSenderContent)
 	for _, check := range []string{
 		"\"context\"",
-		"fctx \"github.com/tjbdwanghaibo/cube-core/ctx\"",
-		"func Sync_PlayerGetLevel(ctx context.Context,",
-		"func MultiGroupSync_GroupCalc(ctx context.Context,",
-		"release := fctx.BindBase(ctx)",
-		"defer release()",
+		"func (s *NestSender) Sync_PlayerGetLevel(ctx context.Context,",
+		"func (s *NestSender) MultiGroupSync_GroupCalc(ctx context.Context,",
+		"client.Request(ctx, handlerNamePlayerGetLevel,",
+		"client.RequestMultiGroup(ctx, handlerNameGroupCalc,",
 	} {
 		if !strings.Contains(syncSenderSrc, check) {
 			t.Errorf("syncsender output missing: %s", check)
@@ -298,12 +303,187 @@ func TestGenerate(t *testing.T) {
 	}
 }
 
+func TestGenerateMultipleNonErrorReturns(t *testing.T) {
+	path := writeTempGoFile(t, `package multiret
+
+type IPlayerEntity interface{ ID() int64 }
+
+//roost:nest
+func handlerLookup(p IPlayerEntity) (string, bool) { return "", false }
+`)
+	funcs, pkg, err := parseFile(path)
+	if err != nil {
+		t.Fatalf("parseFile: %v", err)
+	}
+	if len(funcs) != 1 || len(funcs[0].Returns) != 2 {
+		t.Fatalf("returns = %+v, want two values", funcs[0].Returns)
+	}
+
+	handlerFile := filepath.Join(t.TempDir(), "handler_nest_gen.go")
+	if _, err = generate(funcs, pkg, handlerFile, true, false, "RegisterHandlers"); err != nil {
+		t.Fatalf("generate handler: %v", err)
+	}
+	handlerContent, err := os.ReadFile(handlerFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`r0, r1 := handlerLookup(e0)`,
+		`ret = []any{r0, r1}`,
+	} {
+		if !strings.Contains(string(handlerContent), want) {
+			t.Errorf("handler output missing %q", want)
+		}
+	}
+
+	senderFile := filepath.Join(t.TempDir(), "sender_nest_gen.go")
+	if _, err = generateSyncSender(funcs, pkg+"_syncsender", senderFile, true); err != nil {
+		t.Fatalf("generate sync sender: %v", err)
+	}
+	senderContent, err := os.ReadFile(senderFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`func (s *SenderSender) Sync_Lookup(ctx context.Context, id int64) (ret0 string, ret1 bool, err error)`,
+		`retValues, ok := retXXX.([]any)`,
+		`ret0, ok = retValues[0].(string)`,
+		`ret1, ok = retValues[1].(bool)`,
+	} {
+		if !strings.Contains(string(senderContent), want) {
+			t.Errorf("sync sender output missing %q", want)
+		}
+	}
+}
+
+func TestRoostMarkerExplicitCapabilityAndInjectedSender(t *testing.T) {
+	path := writeTempGoFile(t, `package capability
+
+type BagOwner interface { Bag() any }
+
+//roost:nest target=player sync
+func handlerUse(owner BagOwner, itemID int64) {}
+`)
+	funcs, pkg, err := parseFile(path)
+	if err != nil {
+		t.Fatalf("parseFile: %v", err)
+	}
+	if len(funcs) != 1 || len(funcs[0].Entities) != 1 {
+		t.Fatalf("funcs=%+v", funcs)
+	}
+	if got := funcs[0].Entities[0]; got.Type != "BagOwner" || got.Target != "player" {
+		t.Fatalf("entity=%+v", got)
+	}
+	if !funcs[0].Sync {
+		t.Fatal("sync marker was not retained")
+	}
+
+	asyncFile := filepath.Join(t.TempDir(), "handler_bag_nest_gen.go")
+	if _, err = generate(funcs, pkg+"_sender", asyncFile, true, true, ""); err != nil {
+		t.Fatalf("generate async sender: %v", err)
+	}
+	asyncRaw, err := os.ReadFile(asyncFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"type BagSender struct",
+		"func NewBagSender(client nest.Client) *BagSender",
+		"func (s *BagSender) Send_Use(ctx context.Context, id int64, itemID int64) error",
+		"return client.Dispatch(ctx, handlerNameUse, id, nest.NewParams(itemID))",
+	} {
+		if !strings.Contains(string(asyncRaw), want) {
+			t.Errorf("async sender missing %q:\n%s", want, asyncRaw)
+		}
+	}
+
+	syncFile := filepath.Join(t.TempDir(), "handler_bag_nest_gen.go")
+	if _, err = generateSyncSender(funcs, pkg+"_syncsender", syncFile, true); err != nil {
+		t.Fatalf("generate sync sender: %v", err)
+	}
+	syncRaw, err := os.ReadFile(syncFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"func (s *BagSender) Sync_Use(ctx context.Context, id int64, itemID int64) (err error)",
+		"client.Request(ctx, handlerNameUse, id, nest.NewParams(itemID))",
+	} {
+		if !strings.Contains(string(syncRaw), want) {
+			t.Errorf("sync sender missing %q:\n%s", want, syncRaw)
+		}
+	}
+}
+
+func TestRoostMarkerRejectsInvalidTargetDeclaration(t *testing.T) {
+	path := writeTempGoFile(t, `package capability
+type BagOwner interface { Bag() any }
+//roost:nest targets=player,alliance
+func handlerBad(owner BagOwner) {}
+`)
+	if _, _, err := parseFile(path); err == nil || !strings.Contains(err.Error(), "targets declares 2") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestRoostMethodHandlerInjectsReceiver(t *testing.T) {
+	path := writeTempGoFile(t, `package capability
+type BagOwner interface { Bag() any }
+type Handler struct{}
+//roost:nest target=player
+func (h *Handler) handlerUse(owner BagOwner, itemID int64) error { return nil }
+`)
+	funcs, pkg, err := parseFile(path)
+	if err != nil {
+		t.Fatalf("parseFile: %v", err)
+	}
+	if len(funcs) != 1 {
+		t.Fatalf("funcs=%+v", funcs)
+	}
+	fn := funcs[0]
+	if fn.ReceiverType != "*Handler" || fn.InvokeName != "receiver.handlerUse" || fn.RawName != "Handler.handlerUse" {
+		t.Fatalf("method metadata=%+v", fn)
+	}
+	out := filepath.Join(t.TempDir(), "handler_bag_nest_gen.go")
+	if _, err := generate(funcs, pkg, out, true, false, "RegisterBagNestHandlers"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`nest.NewHandlerName("Handler.handlerUse")`,
+		`func invokeUse(receiver *Handler, es []entity.IThreadSafeEntity`,
+		`err = receiver.handlerUse(e0, p0)`,
+		`func RegisterBagNestHandlers(receiver *Handler)`,
+		`if receiver == nil`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("generated method handler missing %q:\n%s", want, raw)
+		}
+	}
+}
+
+func TestParseRejectsNonFinalOrMultipleErrorReturns(t *testing.T) {
+	for _, signature := range []string{"(error, bool)", "(error, error)"} {
+		path := writeTempGoFile(t, `package invalidret
+type IPlayerEntity interface{ ID() int64 }
+//roost:nest
+func handlerInvalid(p IPlayerEntity) `+signature+` { panic("unused") }
+`)
+		if _, _, err := parseFile(path); err == nil || !strings.Contains(err.Error(), "single final return value") {
+			t.Fatalf("signature %s error = %v", signature, err)
+		}
+	}
+}
+
 func TestGenerateRejectsUnknownRemoteSnapshotTypePackage(t *testing.T) {
 	path := writeTempGoFile(t, `package invalid
 import "github.com/tjbdwanghaibo/cube-core/entity"
 type IPlayerEntity interface{ ID() int64 }
 type Req struct { TargetPlayerViewRef entity.RemoteViewRef `+"`remote:\"unknownpkg.PlayerViewMapSnapshot\"`"+` }
-//cube:nest
+//roost:nest
 func handlerRemoteView(p IPlayerEntity, req Req) {}
 `)
 	funcs, pkg, err := parseFile(path)
@@ -332,7 +512,7 @@ func TestParseFileRejectsInvalidRemoteTags(t *testing.T) {
 import "github.com/tjbdwanghaibo/cube-core/entity"
 type IPlayerEntity interface{ ID() int64 }
 type Req struct { TargetPlayerViewRef entity.RemoteViewRef ` + "`remote:\"write,view.PlayerViewMapSnapshot\"`" + ` }
-//cube:nest
+//roost:nest
 func handlerBad(p IPlayerEntity, req Req) {}
 `,
 			want: "write",
@@ -342,7 +522,7 @@ func handlerBad(p IPlayerEntity, req Req) {}
 			src: `package invalid
 type IPlayerEntity interface{ ID() int64 }
 type Req struct { TargetPlayerViewRef int64 ` + "`remote:\"view.PlayerViewMapSnapshot\"`" + ` }
-//cube:nest
+//roost:nest
 func handlerBad(p IPlayerEntity, req Req) {}
 `,
 			want: "entity.RemoteViewRef",
@@ -356,7 +536,7 @@ type Req struct {
 	TargetPlayerViewRef entity.RemoteViewRef ` + "`remote:\"view.PlayerViewMapSnapshot\"`" + `
 	TargetPlayerRef entity.RemoteViewRef ` + "`remote:\"view.PlayerViewMapSnapshot\"`" + `
 }
-//cube:nest
+//roost:nest
 func handlerBad(p IPlayerEntity, req Req) {}
 `,
 			want: "duplicate remote alias",
@@ -367,7 +547,7 @@ func handlerBad(p IPlayerEntity, req Req) {}
 import "github.com/tjbdwanghaibo/cube-core/entity"
 type IPlayerEntity interface{ ID() int64 }
 type Req struct { TargetPlayerViewRef entity.RemoteViewRef ` + "`remote:\"view.PlayerViewMapSnapshot,requried\"`" + ` }
-//cube:nest
+//roost:nest
 func handlerBad(p IPlayerEntity, req Req) {}
 `,
 			want: "unknown remote tag option",
@@ -449,21 +629,5 @@ func TestGenerateBootstrapNest(t *testing.T) {
 	}
 	if changed {
 		t.Fatal("expected no change on re-run")
-	}
-}
-
-func TestCapabilityEntityWithoutProjectMetadataHasNoConcreteKind(t *testing.T) {
-	viewEntityKindConstCache = nil
-	if got := getSpecialEntityKind("view.IPlayerEntity"); got != "" {
-		t.Fatalf("player kind = %q", got)
-	}
-	if got := getSpecialEntityCategory("view.IPlayerEntity"); got != "" {
-		t.Fatalf("player category = %q", got)
-	}
-	if got := getSpecialEntityKind("view.IBattleEntity"); got != "" {
-		t.Fatalf("battle capability should not generate concrete kind, got %q", got)
-	}
-	if got := getSpecialEntityCategory("view.IBattleEntity"); got != "" {
-		t.Fatalf("battle capability should not generate concrete category, got %q", got)
 	}
 }

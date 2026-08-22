@@ -19,45 +19,45 @@ type IAllianceEntity interface {
 }
 
 type RemoteViewRequest struct {
-	TargetPlayerViewRef entity.RemoteViewRef `remote:"view.PlayerViewMapSnapshot,required"`
-	LivePlayerViewRef   entity.RemoteViewRef `remote:"read_only,view.PlayerViewMapSnapshot"`
+	TargetPlayerViewRef entity.RemoteViewRef `remote:"view.PlayerViewMapSnapshot,consistency=monotonic,required"`
+	LivePlayerViewRef   entity.RemoteViewRef `remote:"view.PlayerViewMapSnapshot,consistency=strong"`
 }
 
 // --- Single entity handler ---
 
-//cube:nest
+//roost:nest
 func handlerPlayerLogin(p IPlayerEntity, token string) {
 }
 
 // --- Single entity handler with return ---
 
-//cube:nest
+//roost:nest
 func handlerPlayerGetLevel(p IPlayerEntity) (ret int32, err error) {
 	return
 }
 
 // --- Multi entity handler ---
 
-//cube:nest rollback=dirty
+//roost:nest rollback=undo durability=strict
 func handlerTransferItem(from IPlayerEntity, to IPlayerEntity, itemId int64, count int32) {
 }
 
 // --- Group entity handler ---
 
-//cube:nest
+//roost:nest
 func handlerBroadcastToGroup(targets []IPlayerEntity, sender IPlayerEntity, msg string) {
 }
 
 // --- Group handler with return ---
 
-//cube:nest
+//roost:nest
 func handlerGroupCalc(targets []IPlayerEntity, val int64) (ret int64, err error) {
 	return
 }
 
 // --- Handler with generated remote access ---
 
-//cube:nest
+//roost:nest
 func handlerRemoteView(p IPlayerEntity, req RemoteViewRequest) {
 	_, _ = req.TargetPlayer()
 	_ = req.MustTargetPlayer()

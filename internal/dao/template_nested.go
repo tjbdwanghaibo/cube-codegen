@@ -5,6 +5,7 @@ package {{.Package}}
 
 import (
 	"github.com/tjbdwanghaibo/cube-core/checkpoint"
+	"github.com/tjbdwanghaibo/cube-core/nest"
 {{- if hasMaps .Nested.Fields}}
 	fmap "github.com/tjbdwanghaibo/cube-core/map"
 {{- end}}
@@ -17,8 +18,12 @@ type {{.Nested.Name}} struct {
 	{{.Name}} {{fieldType .}}
 {{- end}}
 }
-{{range .Nested.Fields}}
+{{range $idx, $field := .Nested.Fields}}
 func (s *{{$.Nested.Name}}) Set{{.Name}}(v {{if eq .Kind 2}}{{rawMapType .}}{{else}}{{.TypeStr}}{{end}}) {
+	if tx := nest.CurrentRollbackTx(); tx != nil && tx.Policy() == nest.RollbackUndo {
+		old := s.{{.Name}}
+		_ = tx.RecordUndo(s, uint64({{$idx}}), func() error { s.{{.Name}} = old; return nil })
+	}
 {{- if eq .Kind 0}}
 	if s.{{.Name}} != v {
 		s.{{.Name}} = v

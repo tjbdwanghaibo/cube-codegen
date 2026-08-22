@@ -1,6 +1,7 @@
 package nest
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -13,7 +14,7 @@ import (
 	"strings"
 )
 
-const nestMarker = "//cube:nest"
+const nestMarker = "//roost:nest"
 
 // FuncInfo describes a handler function to generate code for.
 type FuncInfo struct {
@@ -22,11 +23,16 @@ type FuncInfo struct {
 	Entities      []EntityParam // entity parameters
 	Params        []NonEntityParam
 	Ret           RetParam
+	Returns       []RetParam
 	Err           ErrorRetParam
 	IsCost        bool
+	Sync          bool
 	Rollback      string
+	Durability    string
 	RemoteAccess  []RemoteAccessInfo
 	SourceImports []ImportInfo // imports needed for type references
+	ReceiverType  string       // injected pointer receiver for method handlers
+	InvokeName    string       // package function or receiver method expression
 }
 
 type RemoteAccessInfo struct {
@@ -34,7 +40,10 @@ type RemoteAccessInfo struct {
 	ParamName      string
 	RefExpr        string
 	Mode           string
+	Consistency    string
 	Scope          string
+	Tenant         string
+	Policy         string
 	Type           string
 	Required       bool
 	AllowStale     bool
@@ -57,6 +66,7 @@ type EntityParam struct {
 	IsSpeEntityCategory bool
 	EntityCategory      string // e.g. "entity.EntityCategoryPlayer"
 	EntityKind          string // e.g. "entity.EntityKindPlayer"
+	Target              string // explicit semantic target from //roost:nest
 }
 
 type NonEntityParam struct {
@@ -87,7 +97,8 @@ type ImportInfo struct {
 	Path  string
 }
 
-// parseFile parses a Go source file and extracts functions marked with //cube:nest.
+// parseFile parses a Go source file and extracts functions marked with
+// //roost:nest.
 func parseFile(path string) ([]*FuncInfo, string, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
@@ -95,7 +106,7 @@ func parseFile(path string) ([]*FuncInfo, string, error) {
 	}
 
 	// Quick check: skip files without the marker
-	if !strings.Contains(string(src), nestMarker) {
+	if !containsNestMarker(string(src)) {
 		return nil, "", nil
 	}
 
@@ -121,7 +132,7 @@ func parseFile(path string) ([]*FuncInfo, string, error) {
 	var funcs []*FuncInfo
 	for _, decl := range file.Decls {
 		fnDecl, ok := decl.(*ast.FuncDecl)
-		if !ok || fnDecl.Recv != nil {
+		if !ok {
 			continue
 		}
 		marker := parseFuncMarkers(fnDecl)
@@ -129,11 +140,19 @@ func parseFile(path string) ([]*FuncInfo, string, error) {
 			continue
 		}
 
-		fi := parseFuncDecl(fnDecl)
+		fi, err := parseFuncDecl(fnDecl, marker.NestOptions)
+		if err != nil {
+			return nil, pkg, fmt.Errorf("nest: handler %s: %w", fnDecl.Name.Name, err)
+		}
 		if fi == nil {
 			continue
 		}
 		fi.Rollback = marker.NestOptions["rollback"]
+		fi.Durability = marker.NestOptions["durability"]
+		if err := validateTransactionOptions(fi.Rollback, fi.Durability); err != nil {
+			return nil, pkg, fmt.Errorf("nest: handler %s: %w", fnDecl.Name.Name, err)
+		}
+		fi.Sync = markerOptionEnabled(marker.NestOptions, "sync")
 		attachRemoteStructFieldAccess(fi, remoteStructFields)
 		funcs = append(funcs, fi)
 	}
@@ -148,6 +167,20 @@ func parseFile(path string) ([]*FuncInfo, string, error) {
 	}
 
 	return funcs, pkg, nil
+}
+
+func validateTransactionOptions(rollback string, durability string) error {
+	switch rollback {
+	case "", "state", "undo":
+	default:
+		return fmt.Errorf("unsupported rollback policy %q", rollback)
+	}
+	switch durability {
+	case "", "memory", "async", "strict":
+	default:
+		return fmt.Errorf("unsupported durability policy %q", durability)
+	}
+	return nil
 }
 
 func collectPackageRemoteStructFields(path string, pkg string) (map[string][]remoteStructFieldInfo, []ImportInfo, error) {
@@ -319,7 +352,7 @@ func remoteStructLookupType(typeName string) string {
 }
 
 func parseRemoteTag(raw string) (RemoteAccessInfo, error) {
-	info := RemoteAccessInfo{Mode: "cache"}
+	info := RemoteAccessInfo{Consistency: "monotonic"}
 	for _, part := range strings.Split(raw, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -335,16 +368,24 @@ func parseRemoteTag(raw string) (RemoteAccessInfo, error) {
 				info.CacheTTLMillis = strings.TrimSpace(v)
 			case "min_version":
 				info.MinVersion = strings.TrimSpace(v)
+			case "consistency":
+				info.Consistency = strings.ToLower(strings.TrimSpace(v))
+			case "tenant":
+				info.Tenant = strings.TrimSpace(v)
+			case "policy":
+				info.Policy = strings.TrimSpace(v)
 			default:
 				return info, fmt.Errorf("unknown remote tag option %q", strings.TrimSpace(k))
 			}
 			continue
 		}
 		switch strings.ToLower(part) {
-		case "cache":
-			info.Mode = "cache"
-		case "read_only", "readonly", "read":
-			info.Mode = "read_only"
+		case "cached", "cache":
+			info.Consistency = "cached"
+		case "monotonic":
+			info.Consistency = "monotonic"
+		case "strong", "linearizable":
+			info.Consistency = "strong"
 		case "write":
 			return info, fmt.Errorf("write remote tag is not supported by snapshot access; use nest remote entity dispatch")
 		case "required":
@@ -360,6 +401,11 @@ func parseRemoteTag(raw string) (RemoteAccessInfo, error) {
 			}
 			info.Type = part
 		}
+	}
+	switch info.Consistency {
+	case "cached", "monotonic", "strong", "linearizable":
+	default:
+		return info, fmt.Errorf("unsupported remote consistency %q", info.Consistency)
 	}
 	return info, nil
 }
@@ -410,6 +456,10 @@ func parseFuncMarkers(fnDecl *ast.FuncDecl) funcMarkerInfo {
 	return ret
 }
 
+func containsNestMarker(src string) bool {
+	return strings.Contains(src, nestMarker)
+}
+
 func parseMarkerOptions(raw string) map[string]string {
 	ret := make(map[string]string)
 	for _, part := range strings.Fields(raw) {
@@ -421,6 +471,11 @@ func parseMarkerOptions(raw string) map[string]string {
 		ret[k] = strings.Trim(v, `"`)
 	}
 	return ret
+}
+
+func markerOptionEnabled(options map[string]string, key string) bool {
+	value := strings.ToLower(strings.TrimSpace(options[key]))
+	return value == "true" || value == "1" || value == "yes" || value == "on"
 }
 
 func identifierFromAlias(alias string) string {
@@ -455,9 +510,9 @@ func collectUsedImports(funcs []*FuncInfo, imports []ImportInfo) []ImportInfo {
 				typeRefs[p.Type[:dot]] = true
 			}
 		}
-		if f.Ret.Have {
-			if dot := strings.Index(f.Ret.Type, "."); dot > 0 {
-				typeRefs[f.Ret.Type[:dot]] = true
+		for _, ret := range f.Returns {
+			if dot := strings.Index(ret.Type, "."); dot > 0 {
+				typeRefs[ret.Type[:dot]] = true
 			}
 		}
 		for _, access := range f.RemoteAccess {
@@ -485,10 +540,23 @@ func collectUsedImports(funcs []*FuncInfo, imports []ImportInfo) []ImportInfo {
 	return used
 }
 
-func parseFuncDecl(fnDecl *ast.FuncDecl) *FuncInfo {
+func parseFuncDecl(fnDecl *ast.FuncDecl, markerOptions map[string]string) (*FuncInfo, error) {
 	fi := &FuncInfo{
-		RawName: fnDecl.Name.Name,
-		Name:    fnDecl.Name.Name,
+		RawName:    fnDecl.Name.Name,
+		Name:       fnDecl.Name.Name,
+		InvokeName: fnDecl.Name.Name,
+	}
+	if fnDecl.Recv != nil {
+		if len(fnDecl.Recv.List) != 1 {
+			return nil, errors.New("method handler must have exactly one receiver")
+		}
+		receiverType := types.ExprString(fnDecl.Recv.List[0].Type)
+		if !strings.HasPrefix(receiverType, "*") {
+			return nil, errors.New("method handler receiver must be a pointer")
+		}
+		fi.ReceiverType = receiverType
+		fi.RawName = strings.TrimPrefix(receiverType, "*") + "." + fnDecl.Name.Name
+		fi.InvokeName = "receiver." + fnDecl.Name.Name
 	}
 
 	// Handle _cost suffix
@@ -500,20 +568,16 @@ func parseFuncDecl(fnDecl *ast.FuncDecl) *FuncInfo {
 	fnType := fnDecl.Type
 
 	// Parse parameters
+	declaredTargets, err := parseDeclaredTargets(markerOptions)
+	if err != nil {
+		return nil, err
+	}
+	explicitTargets := len(declaredTargets) > 0
 	var hasEntity bool
 	var startNonEntity bool
+	paramIndex := 0
 	for _, field := range fnType.Params.List {
 		typeName := types.ExprString(field.Type)
-
-		var isGroup bool
-		if isEntityGroupType(typeName) {
-			isGroup = true
-			hasEntity = true
-		} else if isEntityCategory(typeName) {
-			hasEntity = true
-		} else {
-			startNonEntity = true
-		}
 
 		// Handle multiple names sharing same type
 		if len(field.Names) == 0 {
@@ -521,7 +585,17 @@ func parseFuncDecl(fnDecl *ast.FuncDecl) *FuncInfo {
 		}
 
 		for _, name := range field.Names {
-			if startNonEntity && !isGroup && !isEntityCategory(typeName) {
+			isExplicitEntity := explicitTargets && paramIndex < len(declaredTargets)
+			isLegacyGroup := !explicitTargets && isEntityGroupType(typeName)
+			isLegacyEntity := !explicitTargets && isEntityCategory(typeName)
+			isEntity := isExplicitEntity || isLegacyEntity || isLegacyGroup
+			isGroup := isEntity && strings.HasPrefix(typeName, "[]")
+			if isEntity {
+				hasEntity = true
+			} else {
+				startNonEntity = true
+			}
+			if !isEntity || (startNonEntity && !isExplicitEntity && !isLegacyEntity && !isLegacyGroup) {
 				fi.Params = append(fi.Params, NonEntityParam{
 					Index: len(fi.Params),
 					Type:  typeName,
@@ -529,8 +603,6 @@ func parseFuncDecl(fnDecl *ast.FuncDecl) *FuncInfo {
 				})
 			} else {
 				baseType := strings.TrimPrefix(typeName, "[]")
-				entityCategory := getSpecialEntityCategory(baseType)
-				entityKind := getSpecialEntityKind(baseType)
 				param := EntityParam{
 					Index:     len(fi.Entities),
 					Type:      baseType,
@@ -538,34 +610,78 @@ func parseFuncDecl(fnDecl *ast.FuncDecl) *FuncInfo {
 					GroupType: typeName,
 					IsGroup:   isGroup,
 				}
-				if entityCategory != "" || entityKind != "" {
-					param.IsSpeEntityCategory = true
-					param.EntityCategory = entityCategory
-					param.EntityKind = entityKind
+				if isExplicitEntity {
+					param.Target = declaredTargets[paramIndex]
 				}
 				fi.Entities = append(fi.Entities, param)
 			}
+			paramIndex++
 		}
+	}
+	if explicitTargets && len(fi.Entities) != len(declaredTargets) {
+		return nil, fmt.Errorf("targets declares %d entity parameters, parsed %d", len(declaredTargets), len(fi.Entities))
 	}
 
 	if !hasEntity {
-		return nil
+		return nil, nil
 	}
 
 	// Parse return values
+	seenError := false
 	if fnType.Results != nil {
-		for _, field := range fnType.Results.List {
+		for fieldIndex, field := range fnType.Results.List {
 			typeName := types.ExprString(field.Type)
-			if typeName == "error" {
-				fi.Err.Have = true
-			} else {
-				fi.Ret.Have = true
-				fi.Ret.Type = typeName
+			count := len(field.Names)
+			if count == 0 {
+				count = 1
+			}
+			for i := 0; i < count; i++ {
+				if typeName == "error" {
+					if seenError || count != 1 || fieldIndex != len(fnType.Results.List)-1 {
+						return nil, errors.New("error must be the single final return value")
+					}
+					seenError = true
+					fi.Err.Have = true
+					continue
+				}
+				if seenError {
+					return nil, errors.New("non-error return value cannot follow error")
+				}
+				fi.Returns = append(fi.Returns, RetParam{Type: typeName, Have: true})
 			}
 		}
 	}
+	if len(fi.Returns) == 1 {
+		fi.Ret = fi.Returns[0]
+	}
 
-	return fi
+	return fi, nil
+}
+
+func parseDeclaredTargets(options map[string]string) ([]string, error) {
+	if len(options) == 0 {
+		return nil, nil
+	}
+	raw := strings.TrimSpace(options["targets"])
+	if one := strings.TrimSpace(options["target"]); one != "" {
+		if raw != "" {
+			return nil, errors.New("target and targets cannot be used together")
+		}
+		raw = one
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	ret := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, errors.New("target names must not be empty")
+		}
+		ret = append(ret, part)
+	}
+	return ret, nil
 }
 
 // isEntityCategory checks if a type name represents an entity parameter.
@@ -584,131 +700,4 @@ func isEntityGroupType(typeName string) bool {
 		return isEntityCategory(strings.TrimPrefix(typeName, "[]"))
 	}
 	return false
-}
-
-// getSpecialEntityCategory maps entity interface types to category constants by
-// convention. For example, view.IPlayerEntity maps to view.EntityCategoryPlayer.
-func getSpecialEntityCategory(typeName string) string {
-	pkg, name := entityConstName(typeName)
-	if name == "" {
-		return ""
-	}
-	if !entityKindConstAvailable(pkg, name) {
-		return ""
-	}
-	switch name {
-	case "Player":
-		return qualifyConst(pkg, "EntityCategoryPlayer")
-	case "Alliance":
-		return qualifyConst(pkg, "EntityCategoryAlliance")
-	default:
-		return qualifyConst(pkg, "EntityCategoryOther")
-	}
-}
-
-// getSpecialEntityKind maps entity interface types to concrete EntityKind
-// constants by convention. For example, view.IPlayerEntity maps to
-// view.EntityKindPlayer.
-func getSpecialEntityKind(typeName string) string {
-	pkg, name := entityConstName(typeName)
-	if name == "" {
-		return ""
-	}
-	if !entityKindConstAvailable(pkg, name) {
-		return ""
-	}
-	return qualifyConst(pkg, "EntityKind"+name)
-}
-
-func entityKindConstAvailable(pkg string, name string) bool {
-	if pkg == "" {
-		return true
-	}
-	// The cube business view package defines concrete entity kind constants.
-	// Ability-style interfaces such as view.IBattleEntity intentionally do not
-	// have an EntityKindBattle constant; those handlers must rely on full ID
-	// metadata at runtime instead of generated kind hints.
-	if pkg != "view" {
-		return true
-	}
-	return viewEntityKindConstExists("EntityKind" + name)
-}
-
-var viewEntityKindConstCache map[string]bool
-
-func viewEntityKindConstExists(constName string) bool {
-	if viewEntityKindConstCache == nil {
-		viewEntityKindConstCache = loadViewEntityKindConsts()
-	}
-	return viewEntityKindConstCache[constName]
-}
-
-func loadViewEntityKindConsts() map[string]bool {
-	ret := make(map[string]bool)
-	dir := findViewDir()
-	if dir == "" {
-		return ret
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return ret
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
-			continue
-		}
-		raw, err := os.ReadFile(filepath.Join(dir, entry.Name()))
-		if err != nil {
-			continue
-		}
-		src := string(raw)
-		for _, token := range strings.FieldsFunc(src, func(r rune) bool {
-			return !(r == '_' || r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z')
-		}) {
-			if strings.HasPrefix(token, "EntityKind") {
-				ret[token] = true
-			}
-		}
-	}
-	return ret
-}
-
-func findViewDir() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	for {
-		candidate := filepath.Join(cwd, "game", "view")
-		if stat, err := os.Stat(candidate); err == nil && stat.IsDir() {
-			return candidate
-		}
-		next := filepath.Dir(cwd)
-		if next == cwd {
-			return ""
-		}
-		cwd = next
-	}
-}
-
-func entityConstName(typeName string) (pkg string, name string) {
-	if idx := strings.LastIndex(typeName, "."); idx >= 0 {
-		pkg = typeName[:idx]
-		typeName = typeName[idx+1:]
-	}
-	if !strings.HasPrefix(typeName, "I") || !strings.HasSuffix(typeName, "Entity") {
-		return "", ""
-	}
-	name = strings.TrimSuffix(strings.TrimPrefix(typeName, "I"), "Entity")
-	if name == "" {
-		return "", ""
-	}
-	return pkg, name
-}
-
-func qualifyConst(pkg string, name string) string {
-	if pkg == "" {
-		return name
-	}
-	return pkg + "." + name
 }

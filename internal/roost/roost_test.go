@@ -139,23 +139,24 @@ func TestAddCamelCaseProtocolUsesSnakeFileAndPascalTypes(t *testing.T) {
 
 func TestReplicationPresetCompilesAsGoSource(t *testing.T) {
 	m := DefaultManifest("planet", "example.com/planet", []string{"game"}, []string{"etcd"}, []string{"replication-quic", "replication-kcp", "replication-udp"})
-	m.Versions.Kit = "v1.0.5"
+	m.Versions.Kit = "v1.1.0"
 	plan, err := renderProject(m)
 	if err != nil {
 		t.Fatal(err)
 	}
 	file, ok := plan["internal/transport/generated.go"]
-	if !ok || !bytes.Contains(file.Body, []byte("func NewQUIC")) || !bytes.Contains(file.Body, []byte("func NewKCP")) || !bytes.Contains(file.Body, []byte("func NewUDP")) {
+	if !ok || !bytes.Contains(file.Body, []byte("func NewQUIC")) || !bytes.Contains(file.Body, []byte("func NewKCP")) || !bytes.Contains(file.Body, []byte("func NewUDP")) || !bytes.Contains(file.Body, []byte("func NewRoomSink")) {
 		t.Fatalf("replication preset missing:\n%s", file.Body)
 	}
 }
 
 func TestReplicationRequiresFixedKitRelease(t *testing.T) {
 	m := DefaultManifest("planet", "example.com/planet", []string{"game"}, []string{"etcd"}, []string{"replication-quic"})
-	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "v1.0.5") {
+	m.Versions.Kit = "v1.0.5"
+	if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "v1.1.0") {
 		t.Fatalf("expected kit release guard, got %v", err)
 	}
-	m.Versions.Kit = "v1.0.5"
+	m.Versions.Kit = "v1.1.0"
 	if err := m.Validate(); err != nil {
 		t.Fatalf("fixed kit release rejected: %v", err)
 	}

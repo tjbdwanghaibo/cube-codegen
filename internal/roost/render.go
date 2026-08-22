@@ -105,11 +105,19 @@ func renderProject(m Manifest) (map[string]plannedFile, error) {
 func renderReplication(m Manifest) string {
 	var b strings.Builder
 	b.WriteString(generatedHeader + "\npackage transport\n\nimport (\n")
+	b.WriteString("\t\"context\"\n")
 	if hasFeature(m, "replication-udp") {
 		b.WriteString("\t\"net\"\n")
 	}
-	b.WriteString("\tkitrep \"github.com/tjbdwanghaibo/cube-kit/replication\"\n)\n\n")
+	b.WriteString("\tcoreentitysync \"github.com/tjbdwanghaibo/cube-core/entitysync\"\n")
+	b.WriteString("\tcorerep \"github.com/tjbdwanghaibo/cube-core/replication\"\n")
+	b.WriteString("\tkitrep \"github.com/tjbdwanghaibo/cube-kit/replication\"\n")
+	b.WriteString("\tkitsync \"github.com/tjbdwanghaibo/cube-kit/sync\"\n)\n\n")
 	b.WriteString("func AsyncConfig() kitrep.AsyncTransportConfig { return kitrep.DefaultAsyncTransportConfig() }\n\n")
+	b.WriteString("type SessionResolver func(coreentitysync.SubscriberRef) (corerep.SessionID, error)\n\n")
+	b.WriteString("func NewRoomSink(async *kitrep.AsyncTransport, resolve SessionResolver) (*kitsync.RoomTransportSink, error) {\n")
+	b.WriteString("\tif resolve == nil { return nil, kitsync.ErrRoomSessionResolver }\n")
+	b.WriteString("\treturn kitsync.NewRoomTransportSink(kitsync.RoomTransportSinkConfig{Transport: async, Sessions: kitsync.RoomSessionResolverFunc(func(_ context.Context, subscriber coreentitysync.SubscriberRef) (corerep.SessionID, error) { return resolve(subscriber) })})\n}\n\n")
 	if hasFeature(m, "replication-quic") {
 		b.WriteString("func NewQUIC() (*kitrep.AsyncTransport, *kitrep.QUICTransport, error) {\n\tprotocol := kitrep.NewQUICTransport(kitrep.QUICTransportConfig{})\n\tasync, err := kitrep.NewAsyncTransport(protocol, AsyncConfig())\n\treturn async, protocol, err\n}\n\n")
 	}
@@ -125,7 +133,7 @@ func renderReplication(m Manifest) string {
 func renderGoMod(m Manifest) string {
 	return fmt.Sprintf(`module %s
 
-go 1.26.5
+go 1.25.0
 
 require (
 	github.com/tjbdwanghaibo/cube-core v0.0.0
@@ -166,6 +174,10 @@ func renderBootstrap(m Manifest) string {
 		"github.com/tjbdwanghaibo/cube-core/app/buildinfo": "",
 	}
 	allMods := allProjectMods(m)
+	instanceRuntime := contains(allMods, "nest") || contains(allMods, "remote_entity")
+	if instanceRuntime {
+		imports["github.com/tjbdwanghaibo/cube-core/entity"] = ""
+	}
 	for _, name := range allMods {
 		spec := modCatalog[name]
 		imports[spec.ImportPath] = spec.Alias
@@ -177,6 +189,9 @@ func renderBootstrap(m Manifest) string {
 	if hasFeature(m, "config") && contains(allMods, "configdata") {
 		imports["github.com/tjbdwanghaibo/cube-core/configdata"] = "coreconfigdata"
 		imports[m.Project.Module+"/configs/generated"] = "generatedconfig"
+	}
+	if hasFeature(m, "nest") {
+		imports[m.Project.Module+"/game/bootstrap"] = "gamebootstrap"
 	}
 	var b strings.Builder
 	b.WriteString(generatedHeader + "\npackage bootstrap\n\nimport (\n")
@@ -192,7 +207,15 @@ func renderBootstrap(m Manifest) string {
 			fmt.Fprintf(&b, "\t%q\n", path)
 		}
 	}
-	b.WriteString(")\n\nfunc New() (*app.App, error) {\n")
+	b.WriteString(")\n")
+	if instanceRuntime {
+		b.WriteString("\nvar EntityManager = entity.NewEntityManager()\n")
+		b.WriteString("var EntityAccess = entity.NewManagerAccess(EntityManager)\n")
+	}
+	b.WriteString("\nfunc New() (*app.App, error) {\n")
+	if hasFeature(m, "nest") {
+		b.WriteString("\tgamebootstrap.RegisterNestHandlers()\n")
+	}
 	if hasFeature(m, "config") && contains(allMods, "configdata") {
 		b.WriteString("\tif err := generatedconfig.RegisterGeneratedConfigData(coreconfigdata.DefaultRegistry()); err != nil { return nil, err }\n")
 	}
@@ -201,7 +224,7 @@ func renderBootstrap(m Manifest) string {
 	if len(shared) > 0 {
 		b.WriteString("\ta.Mods(\n")
 		for _, name := range shared {
-			fmt.Fprintf(&b, "\t\t%s,\n", modCatalog[name].Constructor)
+			fmt.Fprintf(&b, "\t\t%s,\n", renderModConstructor(name, allMods))
 		}
 		b.WriteString("\t)\n")
 	}
@@ -209,12 +232,27 @@ func renderBootstrap(m Manifest) string {
 		mods, _ := resolveMods(m.Services[name].Mods)
 		fmt.Fprintf(&b, "\ta.RegisterServer(app.ServiceName(%q), service%s.New()", name, safeIdent(name))
 		for _, mod := range mods {
-			fmt.Fprintf(&b, ",\n\t\t%s", modCatalog[mod].Constructor)
+			fmt.Fprintf(&b, ",\n\t\t%s", renderModConstructor(mod, allMods))
 		}
 		b.WriteString(")\n")
 	}
 	b.WriteString("\treturn a, nil\n}\n")
 	return b.String()
+}
+
+func renderModConstructor(name string, allMods []string) string {
+	switch name {
+	case "checkpoint":
+		return "kitcheckpoint.NewMod(kitcheckpoint.WithEntityAccess(EntityAccess))"
+	case "remote_entity":
+		return "kitremoteentity.NewRemoteEntityMod(0, kitremoteentity.WithMongoStorage(EntityAccess))"
+	case "nestwal":
+		return fmt.Sprintf("kitnestwal.NewMod(%t)", contains(allMods, "remote_entity"))
+	case "nest":
+		return "kitnest.NewMod(EntityAccess)"
+	default:
+		return modCatalog[name].Constructor
+	}
 }
 
 func renderService(name string) string {
@@ -253,7 +291,8 @@ func renderServiceConfig(m Manifest, service string, production bool) string {
 		}
 	}
 	if production {
-		return strings.ReplaceAll(strings.ReplaceAll(b.String(), "127.0.0.1", "CHANGE_ME"), "localhost", "CHANGE_ME")
+		value := strings.ReplaceAll(strings.ReplaceAll(b.String(), "127.0.0.1", "CHANGE_ME"), "localhost", "CHANGE_ME")
+		return strings.ReplaceAll(value, "replicas: 1", "replicas: 3")
 	}
 	return b.String()
 }
@@ -403,7 +442,7 @@ func renderCompose(m Manifest) string {
 		b.WriteString("  redis:\n    image: redis:7.4-alpine\n    command: [\"redis-server\", \"--appendonly\", \"yes\"]\n    ports: [\"6379:6379\"]\n    volumes: [\"redis-data:/data\"]\n")
 	}
 	if needed["mongo"] {
-		b.WriteString("  mongo:\n    image: mongo:8.0\n    ports: [\"27017:27017\"]\n    volumes: [\"mongo-data:/data/db\"]\n")
+		b.WriteString("  mongo:\n    image: mongo:8.0\n    command: [\"mongod\", \"--replSet\", \"rs0\", \"--bind_ip_all\"]\n    ports: [\"27017:27017\"]\n    volumes: [\"mongo-data:/data/db\"]\n    healthcheck:\n      test: [\"CMD\", \"mongosh\", \"--quiet\", \"--eval\", \"db.adminCommand('ping').ok\"]\n      interval: 2s\n      timeout: 2s\n      retries: 30\n  mongo-init:\n    image: mongo:8.0\n    restart: \"no\"\n    depends_on:\n      mongo:\n        condition: service_healthy\n    entrypoint: [\"mongosh\", \"--host\", \"mongo:27017\", \"--quiet\", \"--eval\", \"try { rs.status() } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongo:27017'}]}) }\"]\n")
 	}
 	if needed["nats"] {
 		b.WriteString("  nats:\n    image: nats:2.11-alpine\n    command: [\"-js\", \"-m\", \"8222\"]\n    ports: [\"4222:4222\", \"8222:8222\"]\n    volumes: [\"nats-data:/data\"]\n")

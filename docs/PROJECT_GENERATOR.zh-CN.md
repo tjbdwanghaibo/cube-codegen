@@ -16,14 +16,56 @@ roost-codegen 用一份 roost.yaml 管理项目结构、Service、Kit Mod、代�
 
 推荐直接运行固定发布版本，不需要把 codegen 加进业务 module：
 
-    go run github.com/tjbdwanghaibo/roost-codegen/cmd/roost@v1.1.0 help
+    go run github.com/tjbdwanghaibo/roost-codegen/cmd/roost@v1.2.0 help
 
 也可以安装本地命令：
 
-    go install github.com/tjbdwanghaibo/roost-codegen/cmd/roost@v1.1.0
+    go install github.com/tjbdwanghaibo/roost-codegen/cmd/roost@v1.2.0
     roost help
 
 生产项目不要在 Makefile 或 CI 中使用 @latest。创建项目时可以查询最新版本，但落盘后必须固定版本。
+
+### Windows 安装与 PATH
+
+在 roost-codegen 仓库中可以运行可重复执行的安装脚本。脚本读取当前
+`GOBIN`/`GOPATH`，保留它们和现有用户 PATH，只追加 `go install` 实际使用的
+Go bin 目录：
+
+    powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+
+手工配置的等价步骤如下：
+
+    $goBin = (go env GOBIN).Trim()
+    if (-not $goBin) {
+        $goPath = ((go env GOPATH).Trim() -split [IO.Path]::PathSeparator)[0]
+        $goBin = Join-Path $goPath "bin"
+    }
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $entries = @($userPath -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if (-not ($entries | Where-Object { $_.Trim().TrimEnd("\") -ieq $goBin.TrimEnd("\") })) {
+        [Environment]::SetEnvironmentVariable("Path", (($entries + $goBin) -join ";"), "User")
+    }
+
+例如当前 `GOPATH` 为 `D:\Program Files\Go\bin` 且 `GOBIN` 为空时，需要加入
+PATH 的目录就是 `D:\Program Files\Go\bin\bin`。关闭并重新打开 PowerShell 后执行：
+
+    go install github.com/tjbdwanghaibo/roost-codegen/cmd/roost@v1.2.0
+    Get-Command roost
+    roost help
+
+如果安装成功但找不到命令，先检查：
+
+    go env GOBIN GOPATH
+    $goBin = go env GOBIN
+    if (-not $goBin) { $goBin = Join-Path (go env GOPATH) "bin" }
+    Get-ChildItem $goBin -Filter roost.exe
+    $env:Path -split ";"
+
+用户 PATH 修改后，已经打开的 PowerShell 不会自动刷新。可以重新打开终端，或只在当前窗口临时执行：
+
+    $goBin = (go env GOBIN).Trim()
+    if (-not $goBin) { $goBin = Join-Path (((go env GOPATH).Trim() -split [IO.Path]::PathSeparator)[0]) "bin" }
+    $env:Path += ";$goBin"
 
 ## 3. 创建项目
 
@@ -43,8 +85,8 @@ roost-codegen 用一份 roost.yaml 管理项目结构、Service、Kit Mod、代�
 固定依赖版本：
 
     roost project new planet \
-      -roost-core-version v1.1.0 \
-      -roost-kit-version v1.0.4 \
+      -roost-core-version v1.2.0 \
+      -roost-kit-version v1.1.0 \
       -roost-skill-version v1.0.0 \
       -codegen-version v1.1.0
 
@@ -208,7 +250,7 @@ check-generated 会复制项目到临时目录，在副本中执行全部生成�
 
 独立调用：
 
-    go run github.com/tjbdwanghaibo/roost-codegen/cmd/protocol@v1.1.0 \
+    go run github.com/tjbdwanghaibo/roost-codegen/cmd/protocol@v1.2.0 \
       -def ./protocol/def \
       -bind "" \
       -handlers "" \

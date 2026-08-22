@@ -5,7 +5,7 @@
 //
 //	go run ./tool/nest -dir ./game
 //
-// Scans -dir recursively for functions marked with //cube:nest,
+// Scans -dir recursively for functions marked with //roost:nest,
 // and generates:
 //   - <source>_nest_gen.go — invoke wrapper + RegisterNestHandlers()
 //   - sender/<source>_nest_gen.go — typed async sender functions (optional, with -sender)
@@ -23,7 +23,7 @@ import (
 )
 
 func main() {
-	dir := flag.String("dir", ".", "directory to scan for //cube:nest markers")
+	dir := flag.String("dir", ".", "directory to scan for //roost:nest markers")
 	force := flag.Bool("force", false, "force regeneration even if unchanged")
 	sender := flag.Bool("sender", true, "generate sender package (default: true)")
 	flag.Parse()
@@ -42,7 +42,7 @@ func main() {
 		}
 	}
 
-	// Walk directory and find all files with //cube:nest markers
+	// Walk directory and find all files with supported Nest markers.
 	var totalGenerated int
 	var bootstrapRegs []bootstrapRegistration
 	err = filepath.Walk(absDir, func(path string, info os.FileInfo, err error) error {
@@ -80,7 +80,7 @@ func main() {
 		outFile := filepath.Join(outDir, baseName+"_nest_gen.go")
 
 		registerFunc := registerFuncName(baseName)
-		if generateBootstrap {
+		if generateBootstrap && !hasReceiverHandler(funcs) {
 			importPath, err := importPathForDir(moduleRoot, modulePath, outDir)
 			if err != nil {
 				return fmt.Errorf("resolve import path %s: %w", outDir, err)
@@ -153,6 +153,15 @@ func main() {
 	if totalGenerated == 0 {
 		fmt.Println("all files up to date")
 	}
+}
+
+func hasReceiverHandler(funcs []*FuncInfo) bool {
+	for _, fn := range funcs {
+		if fn != nil && fn.ReceiverType != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func registerFuncName(baseName string) string {

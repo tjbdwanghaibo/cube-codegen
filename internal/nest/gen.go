@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"go/format"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/template"
@@ -35,23 +36,27 @@ func generateSyncSender(funcs []*FuncInfo, pkg string, outFile string, force boo
 
 func generateWithMode(funcs []*FuncInfo, pkg string, outFile string, force bool, mode senderMode, registerFunc string) (bool, error) {
 	var buf bytes.Buffer
+	receiverType, err := commonReceiverType(funcs)
+	if err != nil {
+		return false, err
+	}
 
 	tmpl, err := template.New("nest_gen").Funcs(template.FuncMap{
-		"sub":                  func(a, b int) int { return a - b },
-		"firstToUpper":         strFirstToUpper,
-		"firstToLower":         strFirstToLower,
-		"trimHandler":          trimHandlerPrefix,
-		"hasGroup":             hasGroup,
-		"gt":                   func(a, b int) bool { return a > b },
-		"joinEntityIds":        joinEntityIds,
-		"extraImports":         extraImports,
-		"quote":                func(s string) string { return fmt.Sprintf("%q", s) },
-		"rollbackMeta":         rollbackMeta,
-		"remoteParamAccessors": remoteParamAccessors,
-		"remoteKeyName":        remoteKeyName,
-		"remoteModeExpr":       remoteModeExpr,
-		"remoteScopeExpr":      remoteScopeExpr,
-		"remoteTTLExpr":        remoteTTLExpr,
+		"sub":                   func(a, b int) int { return a - b },
+		"firstToUpper":          strFirstToUpper,
+		"firstToLower":          strFirstToLower,
+		"trimHandler":           trimHandlerPrefix,
+		"hasGroup":              hasGroup,
+		"gt":                    func(a, b int) bool { return a > b },
+		"joinEntityIds":         joinEntityIds,
+		"extraImports":          extraImports,
+		"quote":                 func(s string) string { return fmt.Sprintf("%q", s) },
+		"rollbackMeta":          rollbackMeta,
+		"remoteParamAccessors":  remoteParamAccessors,
+		"remoteKeyName":         remoteKeyName,
+		"remoteConsistencyExpr": remoteConsistencyExpr,
+		"remoteScopeExpr":       remoteScopeExpr,
+		"remoteTTLExpr":         remoteTTLExpr,
 	}).Parse(nestTemplate)
 	if err != nil {
 		return false, fmt.Errorf("template parse: %w", err)
@@ -63,8 +68,9 @@ func generateWithMode(funcs []*FuncInfo, pkg string, outFile string, force bool,
 		SenderOnly:      mode != senderModeNone,
 		AsyncSenderOnly: mode == senderModeAsync,
 		SyncSenderOnly:  mode == senderModeSync,
-		HasSyncFuncs:    mode == senderModeSync && hasSyncSenderFuncs(funcs),
 		RegisterFunc:    registerFunc,
+		SenderType:      senderTypeName(outFile),
+		ReceiverType:    receiverType,
 	}
 	if err := validateGeneratedTypeImports(funcs, data.SenderOnly, data.SyncSenderOnly); err != nil {
 		return false, err
@@ -104,17 +110,51 @@ type templateFile struct {
 	SenderOnly      bool
 	AsyncSenderOnly bool
 	SyncSenderOnly  bool
-	HasSyncFuncs    bool
 	RegisterFunc    string
+	SenderType      string
+	ReceiverType    string
 }
 
-func hasSyncSenderFuncs(funcs []*FuncInfo) bool {
+func commonReceiverType(funcs []*FuncInfo) (string, error) {
+	var receiver string
+	initialized := false
 	for _, fn := range funcs {
-		if fn != nil && (fn.Ret.Have || fn.Err.Have) {
-			return true
+		if fn == nil {
+			continue
+		}
+		if !initialized {
+			receiver = fn.ReceiverType
+			initialized = true
+			continue
+		}
+		if fn.ReceiverType != receiver {
+			return "", fmt.Errorf("nest: one source file cannot mix receiver %q with %q", receiver, fn.ReceiverType)
 		}
 	}
-	return false
+	return receiver, nil
+}
+
+func senderTypeName(outFile string) string {
+	base := strings.TrimSuffix(filepath.Base(outFile), filepath.Ext(outFile))
+	base = strings.TrimSuffix(base, "_nest_gen")
+	base = strings.TrimPrefix(base, "handler_")
+	base = strings.TrimPrefix(base, "handler")
+	parts := strings.FieldsFunc(base, func(r rune) bool {
+		return r == '_' || r == '-' || r == '.'
+	})
+	var b strings.Builder
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		b.WriteString(strings.ToUpper(part[:1]))
+		b.WriteString(part[1:])
+	}
+	if b.Len() == 0 {
+		b.WriteString("Nest")
+	}
+	b.WriteString("Sender")
+	return b.String()
 }
 
 func strFirstToUpper(s string) string {
@@ -158,14 +198,30 @@ func joinEntityIds(entities []EntityParam) string {
 }
 
 func rollbackMeta(f *FuncInfo) string {
+	rollback := "nest.RollbackState"
 	switch f.Rollback {
-	case "dirty":
-		return "nest.HandlerMeta{Rollback: nest.RollbackDirty}"
+	case "":
+		if f.Durability == "memory" {
+			rollback = "nest.RollbackNone"
+		}
 	case "state":
-		return "nest.HandlerMeta{Rollback: nest.RollbackState}"
-	default:
+		rollback = "nest.RollbackState"
+	case "undo":
+		rollback = "nest.RollbackUndo"
+	}
+	durability := "nest.DurabilityAsync"
+	switch f.Durability {
+	case "memory":
+		durability = "nest.DurabilityMemory"
+	case "async":
+		durability = "nest.DurabilityAsync"
+	case "strict":
+		durability = "nest.DurabilityStrict"
+	}
+	if rollback == "nest.RollbackNone" && durability == "nest.DurabilityMemory" {
 		return "nest.HandlerMeta{}"
 	}
+	return "nest.HandlerMeta{Rollback: " + rollback + ", Durability: " + durability + "}"
 }
 
 type remoteParamTemplate struct {
@@ -243,14 +299,14 @@ func exportedIdentifier(raw string) string {
 	return b.String()
 }
 
-func remoteModeExpr(mode string) string {
-	switch strings.ToLower(mode) {
-	case "write":
-		return "nest.RemoteAcquireWrite"
-	case "read_only", "readonly", "read":
-		return "nest.RemoteAcquireReadOnly"
+func remoteConsistencyExpr(consistency string) string {
+	switch strings.ToLower(consistency) {
+	case "cached", "cache":
+		return "entity.RemoteReadCached"
+	case "strong", "linearizable":
+		return "entity.RemoteReadLinearizable"
 	default:
-		return "nest.RemoteAcquireCache"
+		return "entity.RemoteReadMonotonic"
 	}
 }
 
@@ -268,7 +324,7 @@ func remoteTTLExpr(access RemoteAccessInfo) string {
 	if access.CacheTTLMillis != "" {
 		return access.CacheTTLMillis
 	}
-	if strings.EqualFold(access.Mode, "read_only") || strings.EqualFold(access.Mode, "readonly") || strings.EqualFold(access.Mode, "read") {
+	if !strings.EqualFold(access.Consistency, "cached") && !strings.EqualFold(access.Consistency, "cache") {
 		return "0"
 	}
 	if access.Type != "" {
@@ -348,7 +404,7 @@ func generatedTypeRefs(funcs []*FuncInfo, senderOnly bool, syncSenderOnly bool) 
 		}
 	}
 	for _, f := range funcs {
-		if syncSenderOnly && !f.Ret.Have && !f.Err.Have {
+		if syncSenderOnly && len(f.Returns) == 0 && !f.Err.Have && !f.Sync {
 			continue
 		}
 		if !senderOnly {
@@ -359,8 +415,10 @@ func generatedTypeRefs(funcs []*FuncInfo, senderOnly bool, syncSenderOnly bool) 
 		for _, p := range f.Params {
 			track(p.Type)
 		}
-		if f.Ret.Have && (!senderOnly || syncSenderOnly) {
-			track(f.Ret.Type)
+		if !senderOnly || syncSenderOnly {
+			for _, ret := range f.Returns {
+				track(ret.Type)
+			}
 		}
 		if !senderOnly {
 			for _, access := range f.RemoteAccess {
@@ -418,9 +476,8 @@ import (
 	"errors"
 	"sync"
 	{{- end}}
-	{{- if $.HasSyncFuncs}}
+	{{- if .SenderOnly}}
 		"context"
-		fctx "github.com/tjbdwanghaibo/cube-core/ctx"
 	{{- end}}
 		"github.com/tjbdwanghaibo/cube-core/nest"
 	{{- if .AsyncSenderOnly}}
@@ -448,9 +505,28 @@ var (
 {{if not .SenderOnly}}
 var {{firstToLower .RegisterFunc}}Once sync.Once
 {{end}}
+{{if .SenderOnly}}
+// {{.SenderType}} is an instance-scoped, strongly typed Nest client. Construct
+// it once at the access boundary and inject it instead of using nest.Nest.
+type {{.SenderType}} struct {
+	client nest.Client
+}
+
+func New{{.SenderType}}(client nest.Client) *{{.SenderType}} {
+	return &{{.SenderType}}{client: client}
+}
+
+func (s *{{.SenderType}}) nestClient() (nest.Client, error) {
+	if s == nil || s.client == nil {
+		return nil, nest.ErrNestStopped
+	}
+	return s.client, nil
+}
+{{end}}
 {{range .Funcs}}
+{{$func := .}}
 {{if not $.SenderOnly}}
-func invoke{{trimHandler .Name}}(es []entity.IThreadSafeEntity, params []any, opts ...nest.HandlerOption) (ret any, err error) {
+func invoke{{trimHandler .Name}}({{if $.ReceiverType}}receiver {{$.ReceiverType}}, {{end}}es []entity.IThreadSafeEntity, params []any, opts ...nest.HandlerOption) (ret any, err error) {
 {{- $rawName := .RawName}}
 {{- $handlerName := trimHandler .Name}}
 {{- if hasGroup .Entities}}
@@ -462,12 +538,17 @@ func invoke{{trimHandler .Name}}(es []entity.IThreadSafeEntity, params []any, op
 		err = errors.New("nest: expected group dispatch")
 		return
 	}
+	if len(optParams.GroupLen) != {{len .Entities}} {
+		err = nest.NewEntityCountMismatchError(handlerName{{trimHandler .Name}}.String(), len(optParams.GroupLen), {{len .Entities}})
+		return
+	}
 
 	checkELen := 0
 	for _, l := range optParams.GroupLen {
 		checkELen += l
 	}
 	if len(es) != checkELen {
+		err = nest.NewEntityCountMismatchError(handlerName{{trimHandler .Name}}.String(), len(es), checkELen)
 		return
 	}
 
@@ -495,6 +576,7 @@ func invoke{{trimHandler .Name}}(es []entity.IThreadSafeEntity, params []any, op
 {{- end}}
 {{- else}}
 	if len(es) != {{len .Entities}} {
+		err = nest.NewEntityCountMismatchError(handlerName{{trimHandler .Name}}.String(), len(es), {{len .Entities}})
 		return
 	}
 {{- range $i, $p := .Entities}}
@@ -520,14 +602,20 @@ func invoke{{trimHandler .Name}}(es []entity.IThreadSafeEntity, params []any, op
 {{- end}}
 {{- end}}
 
-{{- if and .Ret.Have .Err.Have}}
-	ret, err = {{.RawName}}({{range $i, $p := .Entities}}{{if $i}}, {{end}}e{{$p.Index}}{{end}}{{if .Entities}}{{if .Params}}, {{end}}{{end}}{{range $i, $p := .Params}}{{if $i}}, {{end}}p{{$p.Index}}{{end}})
+{{- if gt (len .Returns) 1}}
+	{{range $i, $_ := .Returns}}{{if $i}}, {{end}}r{{$i}}{{end}}{{if .Err.Have}}, callErr{{end}} := {{.InvokeName}}({{range $i, $p := .Entities}}{{if $i}}, {{end}}e{{$p.Index}}{{end}}{{if .Entities}}{{if .Params}}, {{end}}{{end}}{{range $i, $p := .Params}}{{if $i}}, {{end}}p{{$p.Index}}{{end}})
+	{{- if .Err.Have}}
+	err = callErr
+	{{- end}}
+	ret = []any{ {{range $i, $_ := .Returns}}{{if $i}}, {{end}}r{{$i}}{{end}} }
+{{- else if and .Ret.Have .Err.Have}}
+	ret, err = {{.InvokeName}}({{range $i, $p := .Entities}}{{if $i}}, {{end}}e{{$p.Index}}{{end}}{{if .Entities}}{{if .Params}}, {{end}}{{end}}{{range $i, $p := .Params}}{{if $i}}, {{end}}p{{$p.Index}}{{end}})
 {{- else if .Ret.Have}}
-	ret = {{.RawName}}({{range $i, $p := .Entities}}{{if $i}}, {{end}}e{{$p.Index}}{{end}}{{if .Entities}}{{if .Params}}, {{end}}{{end}}{{range $i, $p := .Params}}{{if $i}}, {{end}}p{{$p.Index}}{{end}})
+	ret = {{.InvokeName}}({{range $i, $p := .Entities}}{{if $i}}, {{end}}e{{$p.Index}}{{end}}{{if .Entities}}{{if .Params}}, {{end}}{{end}}{{range $i, $p := .Params}}{{if $i}}, {{end}}p{{$p.Index}}{{end}})
 {{- else if .Err.Have}}
-	err = {{.RawName}}({{range $i, $p := .Entities}}{{if $i}}, {{end}}e{{$p.Index}}{{end}}{{if .Entities}}{{if .Params}}, {{end}}{{end}}{{range $i, $p := .Params}}{{if $i}}, {{end}}p{{$p.Index}}{{end}})
+	err = {{.InvokeName}}({{range $i, $p := .Entities}}{{if $i}}, {{end}}e{{$p.Index}}{{end}}{{if .Entities}}{{if .Params}}, {{end}}{{end}}{{range $i, $p := .Params}}{{if $i}}, {{end}}p{{$p.Index}}{{end}})
 {{- else}}
-	{{.RawName}}({{range $i, $p := .Entities}}{{if $i}}, {{end}}e{{$p.Index}}{{end}}{{if .Entities}}{{if .Params}}, {{end}}{{end}}{{range $i, $p := .Params}}{{if $i}}, {{end}}p{{$p.Index}}{{end}})
+	{{.InvokeName}}({{range $i, $p := .Entities}}{{if $i}}, {{end}}e{{$p.Index}}{{end}}{{if .Entities}}{{if .Params}}, {{end}}{{end}}{{range $i, $p := .Params}}{{if $i}}, {{end}}p{{$p.Index}}{{end}})
 {{- end}}
 	return
 }
@@ -536,36 +624,46 @@ func invoke{{trimHandler .Name}}(es []entity.IThreadSafeEntity, params []any, op
 	{{- /* Single entity: Broadcast, Delay, Send, Sync */}}
 	{{- if eq (len .Entities) 1}}{{if not (index .Entities 0).IsGroup}}
 	{{if $.AsyncSenderOnly}}
-	func Broadcast_{{trimHandler .Name}}(ids []int64{{range .Params}}, {{.Name}} {{.Type}}{{end}}) {
-		nest.Nest.Broadcast(handlerName{{trimHandler .Name}}, ids, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}){{if .IsCost}}, nest.SendOptionIsCost(){{end}})
+	func (s *{{$.SenderType}}) Delay_{{trimHandler .Name}}(ctx context.Context, delay time.Duration, id int64{{range .Params}}, {{.Name}} {{.Type}}{{end}}) error {
+		client, err := s.nestClient()
+		if err != nil { return err }
+		return client.Dispatch(ctx, handlerName{{trimHandler .Name}}, id, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}), nest.SendOptionWithDelay(delay){{if .IsCost}}, nest.SendOptionIsCost(){{end}})
 	}
 
-func Delay_{{trimHandler .Name}}(delay time.Duration, id int64{{range .Params}}, {{.Name}} {{.Type}}{{end}}) {
-	nest.Nest.Send(handlerName{{trimHandler .Name}}, id, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}), nest.SendOptionWithDelay(delay){{if .IsCost}}, nest.SendOptionIsCost(){{end}})
-}
-
-	func Send_{{trimHandler .Name}}(id int64{{range .Params}}, {{.Name}} {{.Type}}{{end}}) {
-		nest.Nest.Send(handlerName{{trimHandler .Name}}, id, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}){{if .IsCost}}, nest.SendOptionIsCost(){{end}})
+	func (s *{{$.SenderType}}) Send_{{trimHandler .Name}}(ctx context.Context, id int64{{range .Params}}, {{.Name}} {{.Type}}{{end}}) error {
+		client, err := s.nestClient()
+		if err != nil { return err }
+		return client.Dispatch(ctx, handlerName{{trimHandler .Name}}, id, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}){{if .IsCost}}, nest.SendOptionIsCost(){{end}})
 	}
+
+	func (s *{{$.SenderType}}) Broadcast_{{trimHandler .Name}}(ctx context.Context, ids []int64{{range .Params}}, {{.Name}} {{.Type}}{{end}}) error {
+		client, err := s.nestClient()
+		if err != nil { return err }
+		return client.DispatchBroadcast(ctx, handlerName{{trimHandler .Name}}, ids, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}){{if .IsCost}}, nest.SendOptionIsCost(){{end}})
+	}
+
 	{{end}}
-	{{if and $.SyncSenderOnly (or .Ret.Have .Err.Have)}}
-	func Sync_{{trimHandler .Name}}(ctx context.Context, id int64{{range .Params}}, {{.Name}} {{.Type}}{{end}}) ({{if .Ret.Have}}ret {{.Ret.Type}}, {{end}}err error) {
-	release := fctx.BindBase(ctx)
-	defer release()
-	{{- if .Ret.Have}}
-		retXXX, errXXX := nest.Nest.Sync(handlerName{{trimHandler .Name}}, id, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}))
-	err = errXXX
-	if err != nil {
-		return
-	}
-	if retXXX == nil {
-		return
-	}
-	ret = retXXX.({{.Ret.Type}})
-{{- else}}
-	_, errXXX := nest.Nest.Sync(handlerName{{trimHandler .Name}}, id, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}))
-	err = errXXX
-	{{- end}}
+	{{if and $.SyncSenderOnly (or (gt (len .Returns) 0) .Err.Have .Sync)}}
+	func (s *{{$.SenderType}}) Sync_{{trimHandler .Name}}(ctx context.Context, id int64{{range .Params}}, {{.Name}} {{.Type}}{{end}}) ({{if gt (len .Returns) 1}}{{range $i, $r := .Returns}}ret{{$i}} {{$r.Type}}, {{end}}{{else if .Ret.Have}}ret {{.Ret.Type}}, {{end}}err error) {
+		client, clientErr := s.nestClient()
+		if clientErr != nil { err = clientErr; return }
+		{{if gt (len .Returns) 0}}retXXX, errXXX{{else}}_, errXXX{{end}} := client.Request(ctx, handlerName{{trimHandler .Name}}, id, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}){{if .IsCost}}, nest.SendOptionIsCost(){{end}})
+		err = errXXX
+		if err != nil { return }
+		{{- if gt (len .Returns) 1}}
+		if retXXX == nil { err = nest.NewResultTypeMismatchError(handlerName{{trimHandler .Name}}.String(), "tuple", retXXX); return }
+		retValues, ok := retXXX.([]any)
+		if !ok || len(retValues) != {{len .Returns}} { err = nest.NewResultTypeMismatchError(handlerName{{trimHandler .Name}}.String(), "tuple[{{len .Returns}}]", retXXX); return }
+		{{- range $i, $r := .Returns}}
+		ret{{$i}}, ok = retValues[{{$i}}].({{$r.Type}})
+		if !ok { err = nest.NewResultTypeMismatchError(handlerName{{trimHandler $func.Name}}.String(), {{quote $r.Type}}, retValues[{{$i}}]); return }
+		{{- end}}
+		{{- else if .Ret.Have}}
+		if retXXX == nil { return }
+		var ok bool
+		ret, ok = retXXX.({{.Ret.Type}})
+		if !ok { err = nest.NewResultTypeMismatchError(handlerName{{trimHandler .Name}}.String(), {{quote .Ret.Type}}, retXXX) }
+		{{- end}}
 		return
 	}
 	{{end}}
@@ -574,92 +672,90 @@ func Delay_{{trimHandler .Name}}(delay time.Duration, id int64{{range .Params}},
 	{{- /* Multi entity (no group): MultiDelay, MultiSend, MultiSync */}}
 	{{- if and (gt (len .Entities) 1) (not (hasGroup .Entities))}}
 	{{if $.AsyncSenderOnly}}
-	func MultiDelay_{{trimHandler .Name}}(delay time.Duration, {{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}} int64{{end}}{{range .Params}}, {{.Name}} {{.Type}}{{end}}) {
+	func (s *{{$.SenderType}}) MultiDelay_{{trimHandler .Name}}(ctx context.Context, delay time.Duration, {{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}} int64{{end}}{{range .Params}}, {{.Name}} {{.Type}}{{end}}) error {
+		client, err := s.nestClient()
+		if err != nil { return err }
 		ids := []int64{ {{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}}{{end}} }
-		opts := []nest.SendOpt{nest.SendOptionWithDelay(delay){{if .IsCost}}, nest.SendOptionIsCost(){{end}}}
-	nest.Nest.MultiSend(handlerName{{trimHandler .Name}}, ids, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}), opts...)
-}
+		return client.DispatchMulti(ctx, handlerName{{trimHandler .Name}}, ids, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}), nest.SendOptionWithDelay(delay){{if .IsCost}}, nest.SendOptionIsCost(){{end}})
+	}
 
-func MultiSend_{{trimHandler .Name}}({{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}} int64{{end}}{{range .Params}}, {{.Name}} {{.Type}}{{end}}) {
-	ids := []int64{ {{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}}{{end}} }
-	opts := []nest.SendOpt{}
-{{- if .IsCost}}
-	opts = append(opts, nest.SendOptionIsCost())
-	{{- end}}
-		nest.Nest.MultiSend(handlerName{{trimHandler .Name}}, ids, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}), opts...)
-	}
-	{{end}}
-	{{if and $.SyncSenderOnly (or .Ret.Have .Err.Have)}}
-	func MultiSync_{{trimHandler .Name}}(ctx context.Context, {{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}} int64{{end}}{{range .Params}}, {{.Name}} {{.Type}}{{end}}) ({{if .Ret.Have}}ret {{.Ret.Type}}, {{end}}err error) {
-	release := fctx.BindBase(ctx)
-	defer release()
+	func (s *{{$.SenderType}}) MultiSend_{{trimHandler .Name}}(ctx context.Context, {{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}} int64{{end}}{{range .Params}}, {{.Name}} {{.Type}}{{end}}) error {
+		client, err := s.nestClient()
+		if err != nil { return err }
 		ids := []int64{ {{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}}{{end}} }
-		opts := []nest.SendOpt{}
-{{- if .IsCost}}
-	opts = append(opts, nest.SendOptionIsCost())
-{{- end}}
-{{- if .Ret.Have}}
-	retXXX, errXXX := nest.Nest.MultiSync(handlerName{{trimHandler .Name}}, ids, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}), opts...)
-	err = errXXX
-	if err != nil {
+		return client.DispatchMulti(ctx, handlerName{{trimHandler .Name}}, ids, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}){{if .IsCost}}, nest.SendOptionIsCost(){{end}})
+	}
+
+	{{end}}
+	{{if and $.SyncSenderOnly (or (gt (len .Returns) 0) .Err.Have .Sync)}}
+	func (s *{{$.SenderType}}) MultiSync_{{trimHandler .Name}}(ctx context.Context, {{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}} int64{{end}}{{range .Params}}, {{.Name}} {{.Type}}{{end}}) ({{if gt (len .Returns) 1}}{{range $i, $r := .Returns}}ret{{$i}} {{$r.Type}}, {{end}}{{else if .Ret.Have}}ret {{.Ret.Type}}, {{end}}err error) {
+		client, clientErr := s.nestClient()
+		if clientErr != nil { err = clientErr; return }
+		ids := []int64{ {{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}}{{end}} }
+		{{if gt (len .Returns) 0}}retXXX, errXXX{{else}}_, errXXX{{end}} := client.RequestMulti(ctx, handlerName{{trimHandler .Name}}, ids, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}){{if .IsCost}}, nest.SendOptionIsCost(){{end}})
+		err = errXXX
+		if err != nil { return }
+		{{- if gt (len .Returns) 1}}
+		if retXXX == nil { err = nest.NewResultTypeMismatchError(handlerName{{trimHandler .Name}}.String(), "tuple", retXXX); return }
+		retValues, ok := retXXX.([]any)
+		if !ok || len(retValues) != {{len .Returns}} { err = nest.NewResultTypeMismatchError(handlerName{{trimHandler .Name}}.String(), "tuple[{{len .Returns}}]", retXXX); return }
+		{{- range $i, $r := .Returns}}
+		ret{{$i}}, ok = retValues[{{$i}}].({{$r.Type}})
+		if !ok { err = nest.NewResultTypeMismatchError(handlerName{{trimHandler $func.Name}}.String(), {{quote $r.Type}}, retValues[{{$i}}]); return }
+		{{- end}}
+		{{- else if .Ret.Have}}
+		if retXXX == nil { return }
+		var ok bool
+		ret, ok = retXXX.({{.Ret.Type}})
+		if !ok { err = nest.NewResultTypeMismatchError(handlerName{{trimHandler .Name}}.String(), {{quote .Ret.Type}}, retXXX) }
+		{{- end}}
 		return
 	}
-	if retXXX == nil {
-		return
-	}
-	ret = retXXX.({{.Ret.Type}})
-{{- else}}
-	_, errXXX := nest.Nest.MultiSync(handlerName{{trimHandler .Name}}, ids, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}), opts...)
-	err = errXXX
-{{- end}}
-	return
-}
 {{end}}
 {{- end}}
 
 	{{- /* Group entity: MultiGroupDelay, MultiGroupSend, MultiGroupSync */}}
 	{{- if hasGroup .Entities}}
 	{{if $.AsyncSenderOnly}}
-	func MultiGroupDelay_{{trimHandler .Name}}(delay time.Duration, {{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}}{{if $p.IsGroup}} []int64{{else}} int64{{end}}{{end}}{{range .Params}}, {{.Name}} {{.Type}}{{end}}) {
-		groupIds := [][]int64{ {{joinEntityIds .Entities}} }
-		opts := []nest.SendOpt{nest.SendOptionWithDelay(delay){{if .IsCost}}, nest.SendOptionIsCost(){{end}}}
-	nest.Nest.MultiGroupSend(handlerName{{trimHandler .Name}}, groupIds, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}), opts...)
-}
+	func (s *{{$.SenderType}}) MultiGroupDelay_{{trimHandler .Name}}(ctx context.Context, delay time.Duration, {{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}}{{if $p.IsGroup}} []int64{{else}} int64{{end}}{{end}}{{range .Params}}, {{.Name}} {{.Type}}{{end}}) error {
+		client, err := s.nestClient()
+		if err != nil { return err }
+		groupIDs := [][]int64{ {{joinEntityIds .Entities}} }
+		return client.DispatchMultiGroup(ctx, handlerName{{trimHandler .Name}}, groupIDs, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}), nest.SendOptionWithDelay(delay){{if .IsCost}}, nest.SendOptionIsCost(){{end}})
+	}
 
-func MultiGroupSend_{{trimHandler .Name}}({{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}}{{if $p.IsGroup}} []int64{{else}} int64{{end}}{{end}}{{range .Params}}, {{.Name}} {{.Type}}{{end}}) {
-	groupIds := [][]int64{ {{joinEntityIds .Entities}} }
-	opts := []nest.SendOpt{}
-{{- if .IsCost}}
-	opts = append(opts, nest.SendOptionIsCost())
-	{{- end}}
-		nest.Nest.MultiGroupSend(handlerName{{trimHandler .Name}}, groupIds, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}), opts...)
+	func (s *{{$.SenderType}}) MultiGroupSend_{{trimHandler .Name}}(ctx context.Context, {{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}}{{if $p.IsGroup}} []int64{{else}} int64{{end}}{{end}}{{range .Params}}, {{.Name}} {{.Type}}{{end}}) error {
+		client, err := s.nestClient()
+		if err != nil { return err }
+		groupIDs := [][]int64{ {{joinEntityIds .Entities}} }
+		return client.DispatchMultiGroup(ctx, handlerName{{trimHandler .Name}}, groupIDs, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}){{if .IsCost}}, nest.SendOptionIsCost(){{end}})
 	}
+
 	{{end}}
-	{{if and $.SyncSenderOnly (or .Ret.Have .Err.Have)}}
-	func MultiGroupSync_{{trimHandler .Name}}(ctx context.Context, {{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}}{{if $p.IsGroup}} []int64{{else}} int64{{end}}{{end}}{{range .Params}}, {{.Name}} {{.Type}}{{end}}) ({{if .Ret.Have}}ret {{.Ret.Type}}, {{end}}err error) {
-	release := fctx.BindBase(ctx)
-	defer release()
-		groupIds := [][]int64{ {{joinEntityIds .Entities}} }
-		opts := []nest.SendOpt{}
-{{- if .IsCost}}
-	opts = append(opts, nest.SendOptionIsCost())
-{{- end}}
-{{- if .Ret.Have}}
-	retXXX, errXXX := nest.Nest.MultiGroupSync(handlerName{{trimHandler .Name}}, groupIds, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}), opts...)
-	err = errXXX
-	if err != nil {
+	{{if and $.SyncSenderOnly (or (gt (len .Returns) 0) .Err.Have .Sync)}}
+	func (s *{{$.SenderType}}) MultiGroupSync_{{trimHandler .Name}}(ctx context.Context, {{range $i, $p := .Entities}}{{if $i}}, {{end}}{{$p.Name}}{{if $p.IsGroup}} []int64{{else}} int64{{end}}{{end}}{{range .Params}}, {{.Name}} {{.Type}}{{end}}) ({{if gt (len .Returns) 1}}{{range $i, $r := .Returns}}ret{{$i}} {{$r.Type}}, {{end}}{{else if .Ret.Have}}ret {{.Ret.Type}}, {{end}}err error) {
+		client, clientErr := s.nestClient()
+		if clientErr != nil { err = clientErr; return }
+		groupIDs := [][]int64{ {{joinEntityIds .Entities}} }
+		{{if gt (len .Returns) 0}}retXXX, errXXX{{else}}_, errXXX{{end}} := client.RequestMultiGroup(ctx, handlerName{{trimHandler .Name}}, groupIDs, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}){{if .IsCost}}, nest.SendOptionIsCost(){{end}})
+		err = errXXX
+		if err != nil { return }
+		{{- if gt (len .Returns) 1}}
+		if retXXX == nil { err = nest.NewResultTypeMismatchError(handlerName{{trimHandler .Name}}.String(), "tuple", retXXX); return }
+		retValues, ok := retXXX.([]any)
+		if !ok || len(retValues) != {{len .Returns}} { err = nest.NewResultTypeMismatchError(handlerName{{trimHandler .Name}}.String(), "tuple[{{len .Returns}}]", retXXX); return }
+		{{- range $i, $r := .Returns}}
+		ret{{$i}}, ok = retValues[{{$i}}].({{$r.Type}})
+		if !ok { err = nest.NewResultTypeMismatchError(handlerName{{trimHandler $func.Name}}.String(), {{quote $r.Type}}, retValues[{{$i}}]); return }
+		{{- end}}
+		{{- else if .Ret.Have}}
+		if retXXX == nil { return }
+		var ok bool
+		ret, ok = retXXX.({{.Ret.Type}})
+		if !ok { err = nest.NewResultTypeMismatchError(handlerName{{trimHandler .Name}}.String(), {{quote .Ret.Type}}, retXXX) }
+		{{- end}}
 		return
 	}
-	if retXXX == nil {
-		return
-	}
-	ret = retXXX.({{.Ret.Type}})
-{{- else}}
-	_, errXXX := nest.Nest.MultiGroupSync(handlerName{{trimHandler .Name}}, groupIds, nest.NewParams({{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}}{{end}}), opts...)
-	err = errXXX
-{{- end}}
-	return
-}
 {{end}}
 {{- end}}
 {{end}}
@@ -679,8 +775,10 @@ func ({{.ParamName}} {{.ParamType}}) RemoteAccess() []nest.RemoteAccess {
 		{
 			Alias: {{quote .Alias}},
 			Ref: {{.RefExpr}},
-			Mode: {{remoteModeExpr .Mode}},
+			Consistency: {{remoteConsistencyExpr .Consistency}},
 			Scope: {{remoteScopeExpr .}},
+			Tenant: {{if .Tenant}}{{.Tenant}}{{else}}0{{end}},
+			Policy: {{if .Policy}}{{.Policy}}{{else}}0{{end}},
 			MinVersion: {{if .MinVersion}}{{.MinVersion}}{{else}}0{{end}},
 			{{- if .AllowStale}}
 			AllowStale: true,
@@ -704,10 +802,15 @@ func ({{$paramName}} {{$paramType}}) Must{{.Accessor}}() {{.Type}} {
 {{end}}
 {{end}}
 
-func {{.RegisterFunc}}() {
+func {{.RegisterFunc}}({{if .ReceiverType}}receiver {{.ReceiverType}}{{end}}) {
+	{{if .ReceiverType}}if receiver == nil { panic("nest: nil handler receiver for {{.RegisterFunc}}") }{{end}}
 	{{firstToLower .RegisterFunc}}Once.Do(func() {
 {{- range .Funcs}}
+		{{- if $.ReceiverType}}
+		nest.MustRegisterHandlerWithMeta(handlerName{{trimHandler .Name}}, func(es []entity.IThreadSafeEntity, params []any, opts ...nest.HandlerOption) (any, error) { return invoke{{trimHandler .Name}}(receiver, es, params, opts...) }, {{rollbackMeta .}})
+		{{- else}}
 		nest.MustRegisterHandlerWithMeta(handlerName{{trimHandler .Name}}, invoke{{trimHandler .Name}}, {{rollbackMeta .}})
+		{{- end}}
 {{- end}}
 	})
 }

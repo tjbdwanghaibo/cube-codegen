@@ -65,7 +65,7 @@ func DefaultManifest(name, module string, services, mods, features []string) Man
 	}
 	shared := []string{"lock", "ops", "statslog"}
 	if len(mods) == 0 {
-		mods = []string{"configdata", "etcd", "redis", "mongo", "nats", "sync", "remote_entity"}
+		mods = []string{"configdata", "etcd", "redis", "mongo", "nats", "sync", "remote_entity", "checkpoint", "nestwal", "nest"}
 	}
 	svc := make(map[string]ServiceSpec, len(services))
 	for _, service := range services {
@@ -74,7 +74,7 @@ func DefaultManifest(name, module string, services, mods, features []string) Man
 	return Manifest{
 		Schema:     1,
 		Project:    ProjectSpec{Name: name, Module: module},
-		Versions:   VersionSpec{Core: "v1.1.0", Kit: "v1.0.4", Skill: "v1.0.0", Codegen: "v1.1.0"},
+		Versions:   VersionSpec{Core: "v1.2.0", Kit: "v1.2.0", Skill: "v1.0.0", Codegen: "v1.2.0"},
 		SharedMods: shared,
 		Services:   svc,
 		Features:   uniqueSorted(features),
@@ -155,8 +155,8 @@ func (m Manifest) Validate() error {
 			joined = errors.Join(joined, fmt.Errorf("unknown feature %q", feature))
 		}
 	}
-	if hasReplicationFeature(m) && !versionAtLeast(m.Versions.Kit, 1, 0, 5) {
-		joined = errors.Join(joined, fmt.Errorf("replication features require roost-kit >= v1.0.5; got %q", m.Versions.Kit))
+	if hasReplicationFeature(m) && !versionAtLeast(m.Versions.Kit, 1, 1, 0) {
+		joined = errors.Join(joined, fmt.Errorf("replication features require roost-kit >= v1.1.0; got %q", m.Versions.Kit))
 	}
 	for kind, space := range m.IDs {
 		if space.Min != 0 || space.Max != 0 {

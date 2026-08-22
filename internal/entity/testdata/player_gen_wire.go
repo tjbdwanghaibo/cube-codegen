@@ -2,7 +2,6 @@
 package testdata
 
 import (
-	"fmt"
 	"sync"
 
 	"github.com/tjbdwanghaibo/cube-core/checkpoint"
@@ -29,10 +28,11 @@ func RegisterEntity() {
 			RemotePolicy: entity.RemotePolicyNone,
 			Lifetime:     entity.EntityLifetimePersistedHotCold,
 			Sync: entity.EntitySyncBuilderParam{
-				Enabled:       true,
-				Topic:         "SyncTopicPlayer",
-				FlushPolicy:   entity.SyncFlushOnEntityRelease,
-				PackerFactory: clientsync.PlayerPacker,
+				Enabled:              true,
+				Topic:                "SyncTopicPlayer",
+				FlushPolicy:          entity.SyncFlushOnEntityRelease,
+				PackerFactory:        clientsync.PlayerPacker,
+				SubjectPackerFactory: clientsync.PlayerSubjectPacker,
 			},
 		})
 	})
@@ -45,7 +45,7 @@ func NewPlayer(param *entity.EntityCreateParam) (*Player, error) {
 	}
 
 	// EntityBase
-	e.EntityBase = entity.NewEntityBase(param.Id, param.Category, false, param.Kind)
+	e.EntityBase = entity.NewEntityBaseWithMutex(param.Id, param.Category, false, param.Mutex, param.Kind)
 	e.EntityBase.SetHooks(e.generatedOnClear, e.generatedOnDestroy)
 
 	// ComponentManager
@@ -99,7 +99,6 @@ func NewPlayer(param *entity.EntityCreateParam) (*Player, error) {
 
 	return e, nil
 }
-
 func (e *Player) Base() *entity.EntityBase { return e.EntityBase }
 
 func (e *Player) BagComp() *BagComponent { return e.bag }
@@ -121,41 +120,6 @@ func (e *Player) generatedOnClear() {
 
 func (e *Player) generatedOnDestroy(reason entity.EntityDestroyReason) {
 	e.ComponentManager.DestroyAll(reason)
-}
-
-func (e *Player) ApplyRemoteSync(collection string, data []byte, version int64) error {
-	_ = version
-	switch collection {
-	case PlayerDaoCollection:
-		if e.dao == nil {
-			e.dao = NewPlayerDao()
-			e.dao.SetId(e.StorageID())
-			e.DaoManager.Set(PlayerDaoCollection, e.dao)
-		}
-		if syncDao, ok := any(e.dao).(interface{ ApplySync([]byte) error }); ok {
-			return syncDao.ApplySync(data)
-		}
-		return fmt.Errorf("Player: remote sync dao players does not implement ApplySync")
-	case MailDaoCollection:
-		if e.mail == nil {
-			e.mail = NewMailDao()
-			e.mail.SetId(e.StorageID())
-			e.DaoManager.Set(MailDaoCollection, e.mail)
-		}
-		if syncDao, ok := any(e.mail).(interface{ ApplySync([]byte) error }); ok {
-			return syncDao.ApplySync(data)
-		}
-		return fmt.Errorf("Player: remote sync dao mails does not implement ApplySync")
-	}
-	return fmt.Errorf("Player: unknown remote sync collection %q", collection)
-}
-
-func (e *Player) OnDataChange(data []byte, version int64) {
-	payload, err := entity.DecodeRemoteSyncPayload(data)
-	if err != nil {
-		return
-	}
-	_ = e.ApplyRemoteSync(payload.Collection, payload.Data, version)
 }
 
 // Snapshot produces save items for the checkpoint system.
@@ -181,6 +145,7 @@ func (e *Player) Snapshot() []checkpoint.SaveItem {
 			}
 			items = append(items, checkpoint.SaveItem{
 				Db:         e.dao.DbName(),
+				DbScope:    checkpoint.ResolveDatabaseScope(e.dao),
 				Collection: e.dao.CollName(),
 				ID:         e.dao.Id(),
 				Version:    ver,
@@ -211,6 +176,7 @@ func (e *Player) Snapshot() []checkpoint.SaveItem {
 			}
 			items = append(items, checkpoint.SaveItem{
 				Db:         e.mail.DbName(),
+				DbScope:    checkpoint.ResolveDatabaseScope(e.mail),
 				Collection: e.mail.CollName(),
 				ID:         e.mail.Id(),
 				Version:    ver,
@@ -221,6 +187,25 @@ func (e *Player) Snapshot() []checkpoint.SaveItem {
 				Tracker:    &e.mail.Tracker,
 			})
 		}
+	}
+	return items
+}
+
+// RemoveSnapshot describes all persistent DAO targets independently of dirty
+// state. Checkpoint writes durable delete tombstones before backend removal.
+func (e *Player) RemoveSnapshot() []checkpoint.SaveItem {
+	items := make([]checkpoint.SaveItem, 0, 2)
+	if e.dao != nil {
+		items = append(items, checkpoint.SaveItem{
+			Db: e.dao.DbName(), DbScope: checkpoint.ResolveDatabaseScope(e.dao),
+			Collection: e.dao.CollName(), ID: e.dao.Id(),
+		})
+	}
+	if e.mail != nil {
+		items = append(items, checkpoint.SaveItem{
+			Db: e.mail.DbName(), DbScope: checkpoint.ResolveDatabaseScope(e.mail),
+			Collection: e.mail.CollName(), ID: e.mail.Id(),
+		})
 	}
 	return items
 }

@@ -3,6 +3,7 @@ package entity
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -32,8 +33,8 @@ func TestParseDir(t *testing.T) {
 	if ent.EntityKind != "EntityKindPlayer" {
 		t.Fatalf("expected entityKind 'EntityKindPlayer', got %q", ent.EntityKind)
 	}
-	if !ent.Sync || ent.SyncTopic != "SyncTopicPlayer" || ent.SyncPacker != "clientsync.PlayerPacker" {
-		t.Fatalf("sync config = enabled:%v topic:%q packer:%q", ent.Sync, ent.SyncTopic, ent.SyncPacker)
+	if !ent.Sync || ent.SyncTopic != "SyncTopicPlayer" || ent.SyncPacker != "clientsync.PlayerPacker" || ent.SubjectPacker != "clientsync.PlayerSubjectPacker" {
+		t.Fatalf("sync config = enabled:%v topic:%q packer:%q subject:%q", ent.Sync, ent.SyncTopic, ent.SyncPacker, ent.SubjectPacker)
 	}
 
 	if len(ent.Components) != 2 {
@@ -97,9 +98,10 @@ func TestGenerate(t *testing.T) {
 		"func NewPlayer(param *entity.EntityCreateParam)",
 		"Category: entity.MustEntityCategoryOfKind(EntityKindPlayer)",
 		"param.NormalizeID(EntityKindPlayer)",
-		`Topic:         "SyncTopicPlayer"`,
-		"PackerFactory: clientsync.PlayerPacker",
-		"e.EntityBase = entity.NewEntityBase(param.Id, param.Category, false, param.Kind)",
+		`"SyncTopicPlayer"`,
+		"clientsync.PlayerPacker",
+		"SubjectPackerFactory: clientsync.PlayerSubjectPacker",
+		"e.EntityBase = entity.NewEntityBaseWithMutex(param.Id, param.Category, false, param.Mutex, param.Kind)",
 		"func (e *Player) Base() *entity.EntityBase",
 		"func (e *Player) BagComp() *BagComponent",
 		"func (e *Player) BattleComp() *BattleComponent",
@@ -110,19 +112,17 @@ func TestGenerate(t *testing.T) {
 		"e.dao = NewPlayerDao()",
 		"e.mail = NewMailDao()",
 		"e.dao.DbName()",
-		"e.dao.DbScope()",
+		"checkpoint.ResolveDatabaseScope(e.dao)",
 		"e.dao.CollName()",
 		"e.dao.Tracker.TakePersistDirty()",
 		"e.dao.MarshalPersist(mask)",
 		"e.mail.DbName()",
-		"e.mail.DbScope()",
+		"checkpoint.ResolveDatabaseScope(e.mail)",
 		"e.mail.CollName()",
 		"e.mail.Tracker.TakePersistDirty()",
 		"e.mail.MarshalPersist(mask)",
 		"func (e *Player) generatedOnClear()",
 		"func (e *Player) generatedOnDestroy(reason entity.EntityDestroyReason)",
-		"func (e *Player) ApplyRemoteSync(collection string, data []byte, version int64) error",
-		"func (e *Player) OnDataChange(data []byte, version int64)",
 		"func (e *Player) Snapshot() []checkpoint.SaveItem",
 	}
 	for _, check := range checks {
@@ -138,6 +138,95 @@ func TestGenerate(t *testing.T) {
 	}
 	if changed {
 		t.Fatal("expected no change on second run")
+	}
+}
+
+func TestGenerateRemoteManagedV2Participant(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("testdata", "player.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Replace(string(source),
+		"//cube:entity entityKind=EntityKindPlayer sync=true",
+		"//cube:entity entityKind=EntityKindPlayer remote=managed sync=true", 1)
+	text = strings.Replace(text, "*entity.EntityBase", "*entity.RemoteEntityBase", 1)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "player.go"), []byte(text), 0644); err != nil {
+		t.Fatal(err)
+	}
+	entities, pkg, err := parseDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entities) != 1 || !entities[0].RemoteBase {
+		t.Fatalf("remote base was not detected: %+v", entities)
+	}
+	out := filepath.Join(dir, "player_gen_wire.go")
+	if _, err := generate(entities[0], pkg, out, true); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated := string(raw)
+	for _, required := range []string{
+		"entity.NewRemoteEntityBaseWithMutex(",
+		"var _ entity.IRemoteCommitParticipant",
+		"BuildRemoteCommitLocked(",
+		"AcknowledgeRemoteCommit(",
+		"RollbackRemoteCommit(",
+		"entity.RemoteDataMutation{",
+		"commit.Invalidations = append(",
+		"entity.MustRegisterRemoteSnapshotDecoder(",
+	} {
+		if !strings.Contains(generated, required) {
+			t.Errorf("generated V2 participant missing %q", required)
+		}
+	}
+}
+
+func TestGeneratePreservesManualSyncMethods(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("testdata", "player.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	source = append(source, []byte(`
+
+func (e *Player) OnDataChange(_ []byte, _ int64) {}
+func (e *Player) Snapshot() []checkpoint.SaveItem { return nil }
+`)...)
+	if err := os.WriteFile(filepath.Join(dir, "player.go"), source, 0644); err != nil {
+		t.Fatal(err)
+	}
+	entities, pkg, err := parseDir(dir)
+	if err != nil {
+		t.Fatalf("parseDir: %v", err)
+	}
+	if len(entities) != 1 {
+		t.Fatalf("entities = %d, want 1", len(entities))
+	}
+	out := filepath.Join(dir, "player_gen_wire.go")
+	if _, err := generate(entities[0], pkg, out, true); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	content, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated := string(content)
+	if contains(generated, "func (e *Player) OnDataChange(") {
+		t.Fatal("generated OnDataChange must not duplicate a manual method")
+	}
+	if contains(generated, "func (e *Player) ApplyRemoteSync(") {
+		t.Fatal("generator must not emit the removed V1 remote sync protocol")
+	}
+	if contains(generated, "func (e *Player) Snapshot(") {
+		t.Fatal("generated Snapshot must not duplicate a manual method")
+	}
+	if !contains(generated, `"github.com/tjbdwanghaibo/cube-core/checkpoint"`) || !contains(generated, "func (e *Player) RemoveSnapshot(") {
+		t.Fatal("persistent entity must retain checkpoint import for generated RemoveSnapshot")
 	}
 }
 

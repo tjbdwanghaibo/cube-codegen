@@ -98,7 +98,7 @@ func init() {
 
 // --- Entity definition (手写) ---
 
-//cube:entity entityKind=EntityKindPlayer sync=true syncTopic=SyncTopicPlayer syncPacker=clientsync.PlayerPacker
+//cube:entity entityKind=EntityKindPlayer sync=true syncTopic=SyncTopicPlayer syncPacker=clientsync.PlayerPacker subjectPacker=clientsync.PlayerSubjectPacker
 type Player struct {
 	*entity.EntityBase
 	entity.ComponentManager

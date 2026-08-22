@@ -42,7 +42,7 @@ var modCatalog = map[string]modSpec{
 	},
 	"mongo": {
 		ImportPath: "github.com/tjbdwanghaibo/cube-kit/mongo", Alias: "kitmongo", Constructor: "kitmongo.NewMongoMod()",
-		Config:     "mongo:\n  uri: mongodb://127.0.0.1:27017\n  connect_timeout: 5s\n  max_pool_size: 100\n  min_pool_size: 5\n",
+		Config:     "mongo:\n  uri: mongodb://127.0.0.1:27017/?replicaSet=rs0\n  connect_timeout: 5s\n  max_pool_size: 100\n  min_pool_size: 5\n",
 		DevService: "mongo",
 	},
 	"nats": {
@@ -55,8 +55,19 @@ var modCatalog = map[string]modSpec{
 		Config: "sync:\n  transport: jetstream\n  prefix: roost.sync\n  storage: file\n  replicas: 1\n  publish_timeout: 3s\n",
 	},
 	"remote_entity": {
-		ImportPath: "github.com/tjbdwanghaibo/cube-kit/remote_entity", Alias: "kitremoteentity", Constructor: "kitremoteentity.NewRemoteEntityMod(0)", Depends: []string{"redis"},
-		Config: "remote_entity:\n  lock_ttl: 15s\n  retry_count: 3\n  retry_delay: 100ms\n  op_timeout: 3s\n  sync_retry_queue_cap: 1024\n  sync_retry_interval: 500ms\n  sync_retry_max_attempts: 10\n",
+		ImportPath: "github.com/tjbdwanghaibo/cube-kit/remote_entity", Alias: "kitremoteentity", Depends: []string{"redis", "mongo", "sync"},
+		Config: "remote_entity:\n  lock_ttl: 15s\n  retry_count: 3\n  retry_delay: 100ms\n  op_timeout: 3s\n  unlock_retry_count: 5\n  unlock_retry_interval: 100ms\n  version_ttl: 24h\n  finalize_retry_interval: 500ms\n  max_write_batch: 64\n  wrapper_capacity: 65536\n  wrapper_idle_ttl: 5m\n  snapshot_cache_shards: 64\n  snapshot_cache_entries: 10000\n  snapshot_cache_bytes: 268435456\n  snapshot_cache_ttl: 30s\n  snapshot_l2_ttl: 10m\n  snapshot_interest_ttl: 30s\n  snapshot_interest_keys: 10000\n  snapshot_interest_subs: 100000\n  marker_cache_ttl: 2s\n  snapshot_load_timeout: 3s\n  snapshot_max_waiters: 4096\n  async_finalize_capacity: 4096\n  async_finalize_workers: 16\n  transaction_track_limit: 100000\n  transaction_track_ttl: 10m\n  mongo:\n    database: remote_entity\n    transaction_ttl: 168h\n",
+	},
+	"checkpoint": {
+		ImportPath: "github.com/tjbdwanghaibo/cube-kit/checkpoint", Alias: "kitcheckpoint", Constructor: "kitcheckpoint.NewMod()", Depends: []string{"mongo", "redis"},
+		Config: "checkpoint:\n  database: game\n  journal_capacity: 10000\n  admission_pending_capacity: 10000\n  admission_retry_interval: 100ms\n  flush_workers: 4\n  batch_size: 200\n  batch_bytes: 524288\n  flush_interval: 1s\n  retry_backoff: 100ms\n  retry_max_backoff: 5s\n  submit_timeout: 50ms\n  load_concurrency: 4\n  mongo_max_concurrent_groups: 8\n  health_warn_fill_ratio: 0.8\n  wal:\n    prefix: roost:checkpoint:wal\n    shards: 16\n    workers: 4\n    queue_capacity: 4096\n    durable_timeout: 50ms\n    replay_batch_size: 200\n",
+	},
+	"nestwal": {
+		ImportPath: "github.com/tjbdwanghaibo/cube-kit/nestwal", Alias: "kitnestwal", Depends: []string{"checkpoint", "nats"},
+		Config: "nest:\n  worker_num: 8\n  heartbeat_worker_num: 2\n  queue_capacity: 4096\n  delayed_capacity: 4096\n  max_delay: 24h\n  tick_duration: 50ms\n  request_timeout: 3s\n  wal:\n    segment_bytes: 268435456\n    max_record_bytes: 4194304\n    queue_capacity: 8192\n    batch_max_records: 256\n    batch_max_bytes: 1048576\n    batch_delay: 1ms\n    group_commit_interval: 2ms\n    retain_segments: 2\n    replay_retry_min: 100ms\n    replay_retry_max: 5s\n    replay_idle_poll: 20ms\n    replay_batch_records: 256\n    startup_timeout: 30s\n    effects:\n      subject_prefix: roost.effect\n      stream: ROOST_EFFECTS\n      max_age: 168h\n      duplicate_window: 24h\n      replicas: 1\n",
+	},
+	"nest": {
+		ImportPath: "github.com/tjbdwanghaibo/cube-kit/nest", Alias: "kitnest", Depends: []string{"nestwal"},
 	},
 }
 

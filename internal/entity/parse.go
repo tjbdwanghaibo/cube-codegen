@@ -25,11 +25,13 @@ type EntityDef struct {
 	Sync            bool   // enable entity base sync by default
 	SyncTopic       string // optional sync topic for generated builder
 	SyncPacker      string // optional entity.EntitySyncBuilderParam.PackerFactory expression
+	SubjectPacker   string // optional observer-free SubjectSyncPacker factory expression
 	Components      []ComponentField
 	Daos            []DaoField
 	SourceFile      string
 	Imports         []ImportDef
 	ExistingMethods map[string]bool
+	RemoteBase      bool // embeds entity.RemoteEntityBase
 }
 
 // ImportDef is an imported package referenced by generated code.
@@ -196,8 +198,10 @@ func extractEntities(fset *token.FileSet, f *ast.File, content []byte, filePath 
 					ent.Sync = parseBoolParam(m.params["sync"])
 					ent.SyncTopic = m.params["syncTopic"]
 					ent.SyncPacker = m.params["syncPacker"]
+					ent.SubjectPacker = m.params["subjectPacker"]
 
 					ent.Components, ent.Daos = extractFields(structType, content, fset)
+					ent.RemoteBase = hasRemoteEntityBase(structType)
 					deriveAccessors(&ent)
 					ent.Imports = collectEntityImports(ent, importMap)
 					entities = append(entities, ent)
@@ -208,6 +212,19 @@ func extractEntities(fset *token.FileSet, f *ast.File, content []byte, filePath 
 	}
 
 	return entities
+}
+
+func hasRemoteEntityBase(st *ast.StructType) bool {
+	for _, field := range st.Fields.List {
+		if len(field.Names) != 0 {
+			continue
+		}
+		name := strings.TrimPrefix(exprToString(field.Type), "*")
+		if name == "entity.RemoteEntityBase" || name == "RemoteEntityBase" {
+			return true
+		}
+	}
+	return false
 }
 
 func collectMethods(f *ast.File) map[string]map[string]bool {
@@ -273,6 +290,7 @@ func collectEntityImports(ent EntityDef, importMap map[string]ImportDef) []Impor
 	add(ent.EntityKind)
 	add(ent.SyncTopic)
 	add(ent.SyncPacker)
+	add(ent.SubjectPacker)
 	for _, comp := range ent.Components {
 		add(comp.CompType)
 		add(comp.GetterType)
